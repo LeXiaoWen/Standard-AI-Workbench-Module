@@ -12,7 +12,11 @@ from backend.main import app
 
 
 client = TestClient(app)
-auth_response = client.post("/api/v1/auth/setup", json={"username": "tester", "password": "test-password"})
+auth_response = client.post(
+    "/api/v1/auth/register",
+    json={"username": "tester", "password": "test-password"},
+    headers={"X-App-Auth-Secret": "test-app-secret"},
+)
 assert auth_response.status_code == 200
 client.headers.update({"Authorization": f"Bearer {auth_response.json()['token']}", "X-App-Auth-Secret": "test-app-secret"})
 
@@ -25,14 +29,17 @@ def test_health():
 
 def test_auth_and_cors_guards():
     bare_client = TestClient(app)
-    status = bare_client.get("/api/v1/auth/status")
+    status = bare_client.get("/api/v1/auth/status", headers={"X-App-Auth-Secret": "test-app-secret"})
     assert status.status_code == 200
-    assert status.json()["setup_required"] is False
-    assert status.json()["existing_username"] == "tester"
+    assert status.json()["registration_allowed"] is True
 
-    wrong_user = bare_client.post("/api/v1/auth/login", json={"username": "other", "password": "test-password"})
+    wrong_user = bare_client.post(
+        "/api/v1/auth/login",
+        json={"username": "other", "password": "test-password"},
+        headers={"X-App-Auth-Secret": "test-app-secret"},
+    )
     assert wrong_user.status_code == 401
-    assert "本机账号为 tester" in wrong_user.json()["detail"]
+    assert "用户名或密码错误" in wrong_user.json()["detail"]
 
     assert bare_client.get("/api/v1/projects").status_code == 403
     assert bare_client.get("/api/v1/projects", headers={"X-App-Auth-Secret": "test-app-secret"}).status_code == 401
@@ -140,3 +147,39 @@ def test_example_workflow_contract_and_artifacts():
     archive = client.get(f"/api/v1/workflows/{workflow_id}/export.zip")
     assert archive.status_code == 200
     assert archive.headers["content-type"] == "application/zip"
+
+
+def test_accounts_are_isolated_by_user_id():
+    project = client.post("/api/v1/projects", json={"title": "账号 A 项目"})
+    assert project.status_code == 200
+    project_id = project.json()["id"]
+    profile = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "DeepSeek",
+            "display_name": "账号 A 模型",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "api_key": "account-a-secret",
+        },
+    )
+    assert profile.status_code == 200
+
+    second = TestClient(app)
+    registration = second.post(
+        "/api/v1/auth/register",
+        json={"username": "tester-b", "password": "test-password"},
+        headers={"X-App-Auth-Secret": "test-app-secret"},
+    )
+    assert registration.status_code == 200
+    second.headers.update(
+        {
+            "Authorization": f"Bearer {registration.json()['token']}",
+            "X-App-Auth-Secret": "test-app-secret",
+        }
+    )
+
+    assert all(item["id"] != project_id for item in second.get("/api/v1/projects").json())
+    assert second.get(f"/api/v1/projects/{project_id}").status_code == 404
+    assert second.get("/api/v1/provider-profiles").json() == []
+    assert all(item["project_id"] != project_id for item in second.get("/api/v1/search", params={"q": "账号 A"}).json())

@@ -11,7 +11,7 @@ from .schemas import (
     ApiConfig,
     AuthLoginRequest,
     AuthLoginResponse,
-    AuthSetupRequest,
+    AuthRegisterRequest,
     AuthStatus,
     AuthUser,
     ChangePasswordRequest,
@@ -35,7 +35,7 @@ from .schemas import (
     WorkbenchProjectUpdate,
 )
 from .services.artifacts import make_zip
-from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, setup_user, user_from_token
+from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, register_user, user_from_token
 from .services.config import API_PRESETS
 from .services.provider_models import list_provider_models as fetch_provider_models
 from .services.tool_runtime import refresh_mcp_tools
@@ -69,7 +69,7 @@ app.add_middleware(
 
 PUBLIC_API_V1_PATHS = {
     "/api/v1/auth/status",
-    "/api/v1/auth/setup",
+    "/api/v1/auth/register",
     "/api/v1/auth/login",
 }
 
@@ -152,9 +152,9 @@ def truncate_text(text: str, max_chars: int = 120_000) -> str:
     return text[:max_chars] + "\n\n[文本过长，已截断。请优先基于已有内容提取，并提示用户可补充缺失页。]"
 
 
-def api_config_from_profile(provider_profile_id: str) -> ApiConfig:
-    profile = workbench_store.get_provider_profile(provider_profile_id)
-    api_key = workbench_store.resolve_api_key(provider_profile_id)
+def api_config_from_profile(user_id: str, provider_profile_id: str) -> ApiConfig:
+    profile = workbench_store.get_provider_profile(user_id, provider_profile_id)
+    api_key = workbench_store.resolve_api_key(user_id, provider_profile_id)
     if not api_key:
         raise ValueError("请先配置 API key。")
     return ApiConfig(provider=profile.provider, base_url=profile.base_url, api_key=api_key, model=profile.model)
@@ -174,21 +174,16 @@ def health():
 @app.get("/api/v1/auth/status", response_model=AuthStatus)
 def get_auth_status(request: Request):
     user = user_from_token(bearer_token(request))
-    first_user = workbench_store.get_first_user()
     return AuthStatus(
-        setup_required=first_user is None,
         authenticated=user is not None,
         username=user.username if user else None,
-        existing_username=first_user.username if first_user else None,
     )
 
 
-@app.post("/api/v1/auth/setup", response_model=AuthLoginResponse)
-def setup_auth(request: AuthSetupRequest):
-    if workbench_store.has_user():
-        raise HTTPException(status_code=400, detail="本机账号已存在，请直接登录。")
+@app.post("/api/v1/auth/register", response_model=AuthLoginResponse)
+def register_auth(request: AuthRegisterRequest):
     try:
-        setup_user(request.username, request.password)
+        register_user(request.username, request.password)
         return login_user(request.username, request.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -201,9 +196,6 @@ def login_auth(request: AuthLoginRequest):
     except AuthRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
-        first_user = workbench_store.get_first_user()
-        if first_user and first_user.username != request.username.strip():
-            raise HTTPException(status_code=401, detail=f"本机账号为 {first_user.username}，请使用该用户名登录。") from exc
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
@@ -228,101 +220,100 @@ def change_auth_password(request: Request, payload: ChangePasswordRequest):
 
 
 @app.get("/api/v1/projects")
-def list_workbench_projects():
-    return workbench_store.list_projects()
+def list_workbench_projects(request: Request):
+    return workbench_store.list_projects(current_user(request).id)
 
 
 @app.post("/api/v1/projects")
-def create_workbench_project(request: WorkbenchProjectCreate):
-    return workbench_store.create_project(request)
+def create_workbench_project(request: Request, payload: WorkbenchProjectCreate):
+    return workbench_store.create_project(current_user(request).id, payload)
 
 
 @app.get("/api/v1/projects/{project_id}")
-def get_workbench_project(project_id: str):
+def get_workbench_project(project_id: str, request: Request):
     try:
-        return workbench_store.get_project(project_id)
+        return workbench_store.get_project(current_user(request).id, project_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="项目不存在。") from exc
 
 
 @app.patch("/api/v1/projects/{project_id}")
-def update_workbench_project(project_id: str, request: WorkbenchProjectUpdate):
+def update_workbench_project(project_id: str, request: Request, payload: WorkbenchProjectUpdate):
     try:
-        return workbench_store.update_project(project_id, request)
+        return workbench_store.update_project(current_user(request).id, project_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="项目不存在。") from exc
 
 
 @app.delete("/api/v1/projects/{project_id}")
-def delete_workbench_project(project_id: str):
+def delete_workbench_project(project_id: str, request: Request):
     try:
-        workbench_store.delete_project(project_id)
+        workbench_store.delete_project(current_user(request).id, project_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="项目不存在。") from exc
     return {"ok": True}
 
 
 @app.get("/api/v1/conversations")
-def list_workbench_conversations(project_id: str | None = Query(default=None)):
-    return workbench_store.list_conversations(project_id)
+def list_workbench_conversations(request: Request, project_id: str | None = Query(default=None)):
+    return workbench_store.list_conversations(current_user(request).id, project_id)
 
 
 @app.post("/api/v1/conversations")
-def create_workbench_conversation(request: WorkbenchConversationCreate):
+def create_workbench_conversation(request: Request, payload: WorkbenchConversationCreate):
     try:
-        return workbench_store.create_conversation(request)
+        return workbench_store.create_conversation(current_user(request).id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="项目不存在。") from exc
 
 
 @app.get("/api/v1/conversations/{conversation_id}")
-def get_workbench_conversation(conversation_id: str):
+def get_workbench_conversation(conversation_id: str, request: Request):
     try:
-        return workbench_store.get_conversation(conversation_id)
+        return workbench_store.get_conversation(current_user(request).id, conversation_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="对话不存在。") from exc
 
 
 @app.patch("/api/v1/conversations/{conversation_id}")
-def update_workbench_conversation(conversation_id: str, request: WorkbenchConversationUpdate):
+def update_workbench_conversation(conversation_id: str, request: Request, payload: WorkbenchConversationUpdate):
     try:
-        return workbench_store.update_conversation(conversation_id, request)
+        return workbench_store.update_conversation(current_user(request).id, conversation_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="对话不存在。") from exc
 
 
 @app.delete("/api/v1/conversations/{conversation_id}")
-def delete_workbench_conversation(conversation_id: str):
+def delete_workbench_conversation(conversation_id: str, request: Request):
     try:
-        workbench_store.delete_conversation(conversation_id)
+        workbench_store.delete_conversation(current_user(request).id, conversation_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="对话不存在。") from exc
     return {"ok": True}
 
 
 @app.get("/api/v1/conversations/{conversation_id}/messages")
-def list_workbench_messages(conversation_id: str):
+def list_workbench_messages(conversation_id: str, request: Request):
     try:
-        workbench_store.get_conversation(conversation_id)
-        return workbench_store.list_messages(conversation_id)
+        return workbench_store.list_messages(current_user(request).id, conversation_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="对话不存在。") from exc
 
 
 @app.get("/api/v1/provider-profiles")
-def list_provider_profiles():
-    return workbench_store.list_provider_profiles()
+def list_provider_profiles(request: Request):
+    return workbench_store.list_provider_profiles(current_user(request).id)
 
 
 @app.post("/api/v1/provider-profiles")
-def create_provider_profile(request: ProviderProfileCreate):
-    return workbench_store.create_provider_profile(request)
+def create_provider_profile(request: Request, payload: ProviderProfileCreate):
+    return workbench_store.create_provider_profile(current_user(request).id, payload)
 
 
 @app.get("/api/v1/provider-profiles/{profile_id}/models", response_model=ProviderModelsResponse)
-async def list_provider_models(profile_id: str):
+async def list_provider_models(profile_id: str, request: Request):
     try:
-        models = await fetch_provider_models(profile_id)
+        models = await fetch_provider_models(current_user(request).id, profile_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="模型配置不存在。") from exc
     except ValueError as exc:
@@ -333,117 +324,122 @@ async def list_provider_models(profile_id: str):
 
 
 @app.patch("/api/v1/provider-profiles/{profile_id}")
-def update_provider_profile(profile_id: str, request: ProviderProfileUpdate):
+def update_provider_profile(profile_id: str, request: Request, payload: ProviderProfileUpdate):
     try:
-        return workbench_store.update_provider_profile(profile_id, request)
+        return workbench_store.update_provider_profile(current_user(request).id, profile_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="模型配置不存在。") from exc
 
 
 @app.delete("/api/v1/provider-profiles/{profile_id}")
-def delete_provider_profile(profile_id: str):
+def delete_provider_profile(profile_id: str, request: Request):
     try:
-        workbench_store.delete_provider_profile(profile_id)
+        workbench_store.delete_provider_profile(current_user(request).id, profile_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="模型配置不存在。") from exc
     return {"ok": True}
 
 
 @app.get("/api/v1/search")
-def search_workbench(q: str = Query(default="")):
-    return workbench_store.search(q)
+def search_workbench(request: Request, q: str = Query(default="")):
+    return workbench_store.search(current_user(request).id, q)
 
 
 @app.get("/api/v1/skills", response_model=list[SkillMetadata])
-def list_skills():
+def list_skills(request: Request):
+    current_user(request)
     return [adapter.metadata() for adapter in list_adapters()]
 
 
 @app.post("/api/v1/workflows", response_model=Workflow)
-def create_workflow(request: WorkflowCreateRequest):
+def create_workflow(request: Request, payload: WorkflowCreateRequest):
     try:
-        adapter = get_adapter(request.skill_name)
+        user = current_user(request)
+        adapter = get_adapter(payload.skill_name)
         workflow = workbench_store.create_workflow(
+            user.id,
             skill_name=adapter.skill_name,
-            project_id=request.project_id,
-            conversation_id=request.conversation_id,
-            input_summary=request.input_text.strip(),
+            project_id=payload.project_id,
+            conversation_id=payload.conversation_id,
+            input_summary=payload.input_text.strip(),
         )
-        if request.input_text.strip():
-            workbench_store.add_message(workflow.conversation_id, "user", request.input_text.strip())
+        if payload.input_text.strip():
+            workbench_store.add_message(user.id, workflow.conversation_id, "user", payload.input_text.strip())
         return workflow
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/workflows", response_model=list[Workflow])
-def list_workflows(conversation_id: str | None = Query(default=None)):
-    return workbench_store.list_workflows(conversation_id)
+def list_workflows(request: Request, conversation_id: str | None = Query(default=None)):
+    return workbench_store.list_workflows(current_user(request).id, conversation_id)
 
 
 @app.get("/api/v1/workflows/{workflow_id}", response_model=Workflow)
-def get_workflow(workflow_id: str):
+def get_workflow(workflow_id: str, request: Request):
     try:
-        return workbench_store.get_workflow(workflow_id)
+        return workbench_store.get_workflow(current_user(request).id, workflow_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工作流不存在。") from exc
 
 
 @app.post("/api/v1/workflows/{workflow_id}/run", response_model=WorkflowActionResponse)
-def run_workflow(workflow_id: str, request: WorkflowRunRequest):
+def run_workflow(workflow_id: str, request: Request, payload: WorkflowRunRequest):
     try:
-        workflow = workbench_store.get_workflow(workflow_id)
+        user = current_user(request)
+        workflow = workbench_store.get_workflow(user.id, workflow_id)
         adapter = get_adapter(workflow.skill_name)
         if workflow.status in {"completed", "cancelled"}:
             raise ValueError("当前工作流已结束。")
-        running = workbench_store.update_workflow(workflow_id, status="running", error=None)
-        workflow, message = adapter.run_stage(running, request.input_text)
+        running = workbench_store.update_workflow(user.id, workflow_id, status="running", error=None)
+        workflow, message = adapter.run_stage(user.id, running, payload.input_text)
         return WorkflowActionResponse(workflow=workflow, message=message)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        failed = workbench_store.update_workflow(workflow_id, status="failed", error=str(exc))
+        failed = workbench_store.update_workflow(current_user(request).id, workflow_id, status="failed", error=str(exc))
         return WorkflowActionResponse(workflow=failed, message=str(exc))
 
 
 @app.post("/api/v1/workflows/{workflow_id}/confirm", response_model=WorkflowActionResponse)
-def confirm_workflow(workflow_id: str, request: WorkflowConfirmRequest):
+def confirm_workflow(workflow_id: str, request: Request, payload: WorkflowConfirmRequest):
     try:
-        workflow = workbench_store.get_workflow(workflow_id)
+        user = current_user(request)
+        workflow = workbench_store.get_workflow(user.id, workflow_id)
         adapter = get_adapter(workflow.skill_name)
         if workflow.status in {"completed", "cancelled"}:
             raise ValueError("当前工作流已结束。")
-        workflow, message = adapter.confirm_stage(workflow, request.text)
+        workflow, message = adapter.confirm_stage(user.id, workflow, payload.text)
         return WorkflowActionResponse(workflow=workflow, message=message)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        failed = workbench_store.update_workflow(workflow_id, status="failed", error=str(exc))
+        failed = workbench_store.update_workflow(current_user(request).id, workflow_id, status="failed", error=str(exc))
         return WorkflowActionResponse(workflow=failed, message=str(exc))
 
 
 @app.post("/api/v1/workflows/{workflow_id}/cancel", response_model=WorkflowActionResponse)
-def cancel_workflow(workflow_id: str):
+def cancel_workflow(workflow_id: str, request: Request):
     try:
-        workflow = workbench_store.update_workflow(workflow_id, status="cancelled", stage="cancelled", error=None)
+        workflow = workbench_store.update_workflow(current_user(request).id, workflow_id, status="cancelled", stage="cancelled", error=None)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工作流不存在。") from exc
     return WorkflowActionResponse(workflow=workflow, message="工作流已取消。")
 
 
 @app.get("/api/v1/workflows/{workflow_id}/artifacts")
-def list_workflow_artifacts(workflow_id: str):
+def list_workflow_artifacts(workflow_id: str, request: Request):
     try:
-        return workbench_store.list_workflow_artifacts(workflow_id)
+        return workbench_store.list_workflow_artifacts(current_user(request).id, workflow_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工作流不存在。") from exc
 
 
 @app.get("/api/v1/workflows/{workflow_id}/artifacts/{name}")
-def get_workflow_artifact(workflow_id: str, name: str):
+def get_workflow_artifact(workflow_id: str, name: str, request: Request):
     decoded = unquote(name)
     try:
-        content, mime_type = workbench_store.get_workflow_artifact_content(workflow_id, decoded)
+        content, mime_type = workbench_store.get_workflow_artifact_content(current_user(request).id, workflow_id, decoded)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="成果文件不存在。") from exc
     return Response(
@@ -454,9 +450,9 @@ def get_workflow_artifact(workflow_id: str, name: str):
 
 
 @app.get("/api/v1/workflows/{workflow_id}/export.zip")
-def export_workflow_zip(workflow_id: str):
+def export_workflow_zip(workflow_id: str, request: Request):
     try:
-        files = workbench_store.get_workflow_artifact_files(workflow_id)
+        files = workbench_store.get_workflow_artifact_files(current_user(request).id, workflow_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工作流不存在。") from exc
     if not files:
@@ -469,48 +465,48 @@ def export_workflow_zip(workflow_id: str):
 
 
 @app.get("/api/v1/web-search-config", response_model=WebSearchConfig)
-def get_web_search_config():
-    return workbench_store.get_web_search_config()
+def get_web_search_config(request: Request):
+    return workbench_store.get_web_search_config(current_user(request).id)
 
 
 @app.patch("/api/v1/web-search-config", response_model=WebSearchConfig)
-def update_web_search_config(request: WebSearchConfigUpdate):
-    return workbench_store.update_web_search_config(request)
+def update_web_search_config(request: Request, payload: WebSearchConfigUpdate):
+    return workbench_store.update_web_search_config(current_user(request).id, payload)
 
 
 @app.get("/api/v1/mcp-servers")
-def list_mcp_servers():
-    return workbench_store.list_mcp_servers()
+def list_mcp_servers(request: Request):
+    return workbench_store.list_mcp_servers(current_user(request).id)
 
 
 @app.post("/api/v1/mcp-servers")
-def create_mcp_server(request: McpServerCreate):
-    return workbench_store.create_mcp_server(request)
+def create_mcp_server(request: Request, payload: McpServerCreate):
+    return workbench_store.create_mcp_server(current_user(request).id, payload)
 
 
 @app.patch("/api/v1/mcp-servers/{server_id}")
-def update_mcp_server(server_id: str, request: McpServerUpdate):
+def update_mcp_server(server_id: str, request: Request, payload: McpServerUpdate):
     try:
-        return workbench_store.update_mcp_server(server_id, request)
+        return workbench_store.update_mcp_server(current_user(request).id, server_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="MCP 服务不存在。") from exc
 
 
 @app.delete("/api/v1/mcp-servers/{server_id}")
-def delete_mcp_server(server_id: str):
+def delete_mcp_server(server_id: str, request: Request):
     try:
-        workbench_store.get_mcp_server(server_id)
+        workbench_store.delete_mcp_server(current_user(request).id, server_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="MCP 服务不存在。") from exc
-    workbench_store.delete_mcp_server(server_id)
     return {"ok": True}
 
 
 @app.post("/api/v1/mcp-servers/{server_id}/refresh-tools")
-async def refresh_mcp_server_tools(server_id: str):
+async def refresh_mcp_server_tools(server_id: str, request: Request):
     try:
-        await refresh_mcp_tools(server_id)
-        return {"tools": workbench_store.list_mcp_tools(server_id)}
+        user = current_user(request)
+        await refresh_mcp_tools(user.id, server_id)
+        return {"tools": workbench_store.list_mcp_tools(user.id, server_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="MCP 服务不存在。") from exc
     except Exception as exc:
@@ -518,31 +514,31 @@ async def refresh_mcp_server_tools(server_id: str):
 
 
 @app.post("/api/v1/chat/stream")
-async def stream_workbench_chat(request: ChatStreamRequest):
-    return StreamingResponse(stream_chat(request), media_type="text/event-stream")
+async def stream_workbench_chat(request: Request, payload: ChatStreamRequest):
+    return StreamingResponse(stream_chat(current_user(request).id, payload), media_type="text/event-stream")
 
 
 @app.post("/api/v1/chat/tool-calls/{tool_call_id}/approve")
-def approve_chat_tool_call(tool_call_id: str):
+def approve_chat_tool_call(tool_call_id: str, request: Request):
     try:
-        return approve_tool_call(tool_call_id)
+        return approve_tool_call(current_user(request).id, tool_call_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工具调用不存在。") from exc
 
 
 @app.post("/api/v1/chat/tool-calls/{tool_call_id}/reject")
-def reject_chat_tool_call(tool_call_id: str):
+def reject_chat_tool_call(tool_call_id: str, request: Request):
     try:
-        return reject_tool_call(tool_call_id)
+        return reject_tool_call(current_user(request).id, tool_call_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="工具调用不存在。") from exc
 
 
 @app.post("/api/v1/chat/tool-calls/{tool_call_id}/resume-stream")
-async def resume_chat_tool_call(tool_call_id: str):
-    return StreamingResponse(resume_tool_call_stream(tool_call_id), media_type="text/event-stream")
+async def resume_chat_tool_call(tool_call_id: str, request: Request):
+    return StreamingResponse(resume_tool_call_stream(current_user(request).id, tool_call_id), media_type="text/event-stream")
 
 
 @app.post("/api/v1/chat/{run_id}/cancel")
-def cancel_workbench_chat(run_id: str):
-    return {"ok": cancel_run(run_id)}
+def cancel_workbench_chat(run_id: str, request: Request):
+    return {"ok": cancel_run(current_user(request).id, run_id)}

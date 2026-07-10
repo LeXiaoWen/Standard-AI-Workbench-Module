@@ -16,7 +16,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   changePassword,
@@ -39,7 +39,7 @@ import {
   searchWorkbench,
   setApiBaseUrl,
   setAuthContext,
-  setupAuth,
+  registerAuth,
   streamChat,
   updateProviderProfile,
   updateWebSearchConfig,
@@ -60,14 +60,14 @@ import { applyChatStreamEvent } from "@/lib/chatReducer";
 
 const providerPresets = [
   { provider: "OpenAI", display_name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
-  { provider: "DeepSeek", display_name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  { provider: "DeepSeek", display_name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash" },
   { provider: "通义千问 DashScope", display_name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
   { provider: "SiliconFlow", display_name: "SiliconFlow", base_url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V3" },
   { provider: "OpenRouter", display_name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
   { provider: "自定义", display_name: "自定义", base_url: "", model: "" },
 ];
 
-type AuthMode = "setup" | "login" | "ready";
+type AuthMode = "register" | "login" | "ready";
 
 const emptyAuthForm = {
   username: "",
@@ -148,6 +148,8 @@ function avatarContent(value: string) {
 
 export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(300);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [projectConversations, setProjectConversations] = useState<WorkbenchConversation[]>([]);
   const [recentConversations, setRecentConversations] = useState<WorkbenchConversation[]>([]);
@@ -189,16 +191,56 @@ export default function Home() {
     () => [...projectConversations, ...recentConversations].find((conversation) => conversation.id === currentConversationId) ?? null,
     [projectConversations, recentConversations, currentConversationId],
   );
-  const projectPreviewConversations = useMemo(() => projectConversations.slice(0, PROJECT_PREVIEW_CONVERSATION_LIMIT), [projectConversations]);
+  const defaultProject = useMemo(
+    () => projects.find((project) => !project.workspace_path && project.title === "默认项目") ?? projects.find((project) => !project.workspace_path) ?? null,
+    [projects],
+  );
+  const projectPreviewConversations = useMemo(
+    () => (currentProject?.workspace_path ? projectConversations.slice(0, PROJECT_PREVIEW_CONVERSATION_LIMIT) : []),
+    [currentProject?.workspace_path, projectConversations],
+  );
   const sidebarHistoryConversations = useMemo(() => {
-    const previewIds = new Set(projectPreviewConversations.map((conversation) => conversation.id));
-    return recentConversations.filter((conversation) => !previewIds.has(conversation.id));
-  }, [projectPreviewConversations, recentConversations]);
+    return recentConversations.filter((conversation) => conversation.project_id === defaultProject?.id);
+  }, [defaultProject?.id, recentConversations]);
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
 
   useEffect(() => {
     void initializeAuth();
   }, []);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      void logoutUser();
+      setError("登录会话已失效，请重新登录。");
+    };
+    window.addEventListener("ai-workbench-auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("ai-workbench-auth-expired", handleAuthExpired);
+  }, []);
+
+  useEffect(() => {
+    const savedWidth = Number(window.localStorage.getItem("standard-wb-sidebar-width"));
+    if (Number.isFinite(savedWidth) && savedWidth >= 250 && savedWidth <= 440) setSidebarWidth(savedWidth);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("standard-wb-sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizingSidebar) return;
+    const resizeSidebar = (event: PointerEvent) => setSidebarWidth(Math.min(440, Math.max(250, event.clientX)));
+    const stopResizing = () => setIsResizingSidebar(false);
+    document.addEventListener("pointermove", resizeSidebar);
+    document.addEventListener("pointerup", stopResizing);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    return () => {
+      document.removeEventListener("pointermove", resizeSidebar);
+      document.removeEventListener("pointerup", stopResizing);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizingSidebar]);
 
   useEffect(() => {
     setUserChatAvatar(window.localStorage.getItem("standard-wb-user-avatar") || "我");
@@ -216,10 +258,6 @@ export default function Home() {
       setAuthContext({ appSecret, token: savedToken });
       const status = await getAuthStatusWithRetry();
       setAuthBackendReady(true);
-      if (status.setup_required) {
-        setAuthMode("setup");
-        return;
-      }
       if (status.authenticated && savedToken) {
         const user = await getMe();
         setAuthUser(user);
@@ -235,7 +273,7 @@ export default function Home() {
     }
   }
 
-  function switchAuthMode(nextMode: "login" | "setup") {
+  function switchAuthMode(nextMode: "login" | "register") {
     setAuthMode(nextMode);
     setAuthForm(emptyAuthForm);
     setError(null);
@@ -283,15 +321,16 @@ export default function Home() {
         max_results: String(nextWebSearchConfig.max_results),
         search_depth: nextWebSearchConfig.search_depth,
       });
-      setCurrentProjectId(nextProjects[0]?.id ?? null);
+      const initialProject = nextProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? nextProjects.find((project) => !project.workspace_path) ?? nextProjects[0];
+      setCurrentProjectId(initialProject?.id ?? null);
       setCurrentProfileId(nextProfiles[0]?.id ?? null);
       const [nextProjectConversations, nextRecentConversations] = await Promise.all([
-        nextProjects[0]?.id ? listConversations(nextProjects[0].id) : Promise.resolve([]),
+        initialProject?.id ? listConversations(initialProject.id) : Promise.resolve([]),
         listConversations(),
       ]);
       setProjectConversations(nextProjectConversations);
       setRecentConversations(nextRecentConversations);
-      const firstConversation = nextProjectConversations[0] ?? nextRecentConversations[0];
+      const firstConversation = nextRecentConversations.find((conversation) => conversation.project_id === initialProject?.id) ?? nextProjectConversations[0];
       if (firstConversation) {
         await openConversation(firstConversation.id);
       }
@@ -363,7 +402,9 @@ export default function Home() {
     try {
       await deleteProject(project.id);
       const nextProjects = await listProjects();
-      const nextProjectId = project.id === currentProjectId ? nextProjects[0]?.id ?? null : currentProjectId;
+      const nextProjectId = project.id === currentProjectId
+        ? nextProjects.find((item) => !item.workspace_path && item.title === "默认项目")?.id ?? nextProjects.find((item) => !item.workspace_path)?.id ?? null
+        : currentProjectId;
       setProjects(nextProjects);
       setCurrentProjectId(nextProjectId);
       await refreshConversations(nextProjectId);
@@ -395,16 +436,16 @@ export default function Home() {
   async function startNewChat() {
     setError(null);
     try {
+      const latestProjects = projects.length > 0 ? projects : await listProjects();
+      const targetProject = latestProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? latestProjects.find((project) => !project.workspace_path);
       const conversation = await createConversation({
-        project_id: currentProjectId ?? undefined,
+        project_id: targetProject?.id,
         title: "新对话",
         provider_profile_id: currentProfileId ?? undefined,
         model: currentProfile?.model,
       });
-      if (!currentProjectId || conversation.project_id !== currentProjectId) {
-        setProjects(await listProjects());
-        setCurrentProjectId(conversation.project_id);
-      }
+      setProjects(await listProjects());
+      setCurrentProjectId(conversation.project_id);
       setCurrentConversationId(conversation.id);
       setMessages([]);
       setInput("");
@@ -601,14 +642,14 @@ export default function Home() {
       setError("请输入用户名和密码。");
       return;
     }
-    if (authMode === "setup" && authForm.password !== authForm.confirmPassword) {
+    if (authMode === "register" && authForm.password !== authForm.confirmPassword) {
       setError("两次输入的密码不一致。");
       return;
     }
     try {
       const response =
-        authMode === "setup"
-          ? await setupAuth({ username, password: authForm.password })
+        authMode === "register"
+          ? await registerAuth({ username, password: authForm.password })
           : await loginAuth({ username, password: authForm.password });
       await completeAuthSession(response.token);
     } catch (caught) {
@@ -776,13 +817,13 @@ export default function Home() {
         <section className="auth-panel">
           <div className="auth-heading">
             <span>AI Workbench</span>
-            <h1>{authMode === "setup" ? "注册" : "登录"}</h1>
+            <h1>{authMode === "register" ? "注册" : "登录"}</h1>
           </div>
           <div className="auth-tabs" role="tablist" aria-label="账号入口">
             <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>
               登录
             </button>
-            <button type="button" className={authMode === "setup" ? "active" : ""} onClick={() => switchAuthMode("setup")}>
+            <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>
               注册
             </button>
           </div>
@@ -797,11 +838,11 @@ export default function Home() {
                 value={authForm.password}
                 type="password"
                 onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })}
-                autoComplete={authMode === "setup" ? "new-password" : "current-password"}
+                autoComplete={authMode === "register" ? "new-password" : "current-password"}
                 disabled={!authBackendReady}
               />
             </label>
-            {authMode === "setup" && (
+            {authMode === "register" && (
               <label>
                 确认密码
                 <input
@@ -813,7 +854,7 @@ export default function Home() {
                 />
               </label>
             )}
-            <button type="submit" disabled={!authBackendReady}>{authMode === "setup" ? "注册并进入" : "登录"}</button>
+            <button type="submit" disabled={!authBackendReady}>{authMode === "register" ? "注册并进入" : "登录"}</button>
           </form>
           {!authBackendReady && !error && (
             <div className="auth-status">
@@ -836,7 +877,11 @@ export default function Home() {
   }
 
   return (
-    <main className="workbench-shell" data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}>
+    <main
+      className="workbench-shell"
+      data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <aside className="sidebar">
         <div className="sidebar-top">
           {!sidebarCollapsed && <div className="app-mark">AI Workbench</div>}
@@ -1012,6 +1057,7 @@ export default function Home() {
                     )}
                   </div>
                   {!sidebarCollapsed &&
+                    project.workspace_path &&
                     project.id === currentProjectId &&
                     projectPreviewConversations.map((conversation) => (
                       <div className={conversation.id === currentConversationId ? "sidebar-item-shell project-chat-shell active" : "sidebar-item-shell project-chat-shell"} key={conversation.id}>
@@ -1076,7 +1122,7 @@ export default function Home() {
               </div>
               <div className="user-detail">
                 <span>数据范围</span>
-                <strong>本机单用户数据</strong>
+                <strong>当前账号独立数据</strong>
               </div>
               <div className="avatar-settings">
                 <label>
@@ -1137,6 +1183,29 @@ export default function Home() {
           )}
           {!sidebarCollapsed && <ChevronRight className={userPanelOpen ? "chevron open" : "chevron"} size={16} />}
         </button>
+        {!sidebarCollapsed && (
+          <div
+            className="sidebar-resize-handle"
+            role="separator"
+            aria-label="调整侧边栏宽度"
+            aria-orientation="vertical"
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              setIsResizingSidebar(true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.max(250, current - 16));
+              }
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.min(440, current + 16));
+              }
+            }}
+          />
+        )}
       </aside>
 
       <section className="chat-workspace">

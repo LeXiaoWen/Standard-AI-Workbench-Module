@@ -56,7 +56,7 @@ textarea:focus {
 
 .workbench-shell {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 300px) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
   background: var(--app-bg);
@@ -188,13 +188,13 @@ textarea:focus {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
   min-height: 0;
   border-right: 1px solid var(--sidebar-line);
   background: linear-gradient(180deg, var(--sidebar-top) 0%, #e8f4fa 48%, var(--sidebar-bottom) 100%);
   box-shadow: inset -16px 0 28px rgba(255, 255, 255, 0.36);
-  padding: 18px 16px 0;
+  padding: 16px 14px 0;
 }
 
 .sidebar-top,
@@ -227,7 +227,7 @@ textarea:focus {
   min-width: 0;
   overflow: hidden;
   color: #5f6b73;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 740;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -279,7 +279,7 @@ textarea:focus {
 .menu-command span {
   overflow: hidden;
   color: #424b52;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 720;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -311,7 +311,7 @@ textarea:focus {
   border: 0;
   background: transparent;
   color: #94a1aa;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 760;
   padding: 0 6px;
   text-align: left;
@@ -411,9 +411,9 @@ textarea:focus {
 
 .nav-list button {
   gap: 9px;
-  min-height: 34px;
+  min-height: 32px;
   padding: 0 8px;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 560;
 }
 
@@ -428,7 +428,7 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) 30px;
   align-items: center;
   min-width: 0;
-  border-radius: 14px;
+  border-radius: 10px;
 }
 
 .sidebar-item-shell.active {
@@ -438,11 +438,11 @@ textarea:focus {
 .project-row,
 .conversation-row {
   display: grid;
-  grid-template-columns: 25px minmax(0, 1fr);
+  grid-template-columns: 23px minmax(0, 1fr);
   align-items: center;
   width: 100%;
-  min-height: 34px;
-  border-radius: 14px;
+  min-height: 32px;
+  border-radius: 10px;
   background: transparent;
 }
 
@@ -456,21 +456,21 @@ textarea:focus {
 .conversation-row span {
   min-width: 0;
   color: #364048;
-  font-size: 16px;
-  font-weight: 580;
+  font-size: 14px;
+  font-weight: 620;
   line-height: 1.2;
 }
 
 .workspace-picker-row {
   display: grid;
-  grid-template-columns: 25px minmax(0, 1fr);
+  grid-template-columns: 23px minmax(0, 1fr);
   align-items: center;
-  min-height: 36px !important;
+  min-height: 34px !important;
   border: 1px solid rgba(143, 161, 173, 0.18) !important;
-  border-radius: 14px !important;
+  border-radius: 10px !important;
   background: rgba(255, 255, 255, 0.3) !important;
   color: #596771 !important;
-  font-size: 15px !important;
+  font-size: 13px !important;
   font-weight: 720 !important;
 }
 
@@ -500,12 +500,12 @@ textarea:focus {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: 8px;
-  min-height: 34px !important;
-  border-radius: 15px !important;
-  padding: 0 9px 0 45px !important;
+  min-height: 30px !important;
+  border-radius: 10px !important;
+  padding: 0 8px 0 31px !important;
   color: #333d45 !important;
-  font-size: 15px !important;
-  font-weight: 690 !important;
+  font-size: 13px !important;
+  font-weight: 620 !important;
   line-height: 1.2;
 }
 
@@ -518,23 +518,23 @@ textarea:focus {
   justify-self: end;
   min-width: max-content;
   color: #7f8a92;
-  font-size: 14px;
-  font-weight: 680;
+  font-size: 12px;
+  font-weight: 620;
 }
 
 .history-list .conversation-row {
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: 8px;
-  min-height: 32px;
+  min-height: 30px;
   background: transparent;
   color: #20262b;
-  font-size: 15px;
-  font-weight: 690;
+  font-size: 13px;
+  font-weight: 620;
   padding: 0 6px;
 }
 
 .history-list .conversation-row time {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .history-list {
@@ -607,17 +607,22 @@ textarea:focus {
 }
 
 .user-panel {
+  position: absolute;
+  z-index: 12;
+  right: 8px;
+  bottom: 70px;
+  left: 8px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 9px;
-  flex: 0 1 auto;
   min-width: 0;
-  max-height: min(520px, calc(100vh - 190px));
+  height: min(520px, calc(100vh - 96px));
   overflow: hidden;
   border: 1px solid rgba(158, 168, 176, 0.22);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.48);
+  background: #f7fbfe;
   padding: 10px;
+  box-shadow: 0 16px 36px rgba(74, 91, 103, 0.2);
 }
 
 .user-panel-header {
@@ -920,6 +925,34 @@ textarea:focus {
   border-color: #202226;
   background: #202226;
   color: #fff;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  z-index: 18;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 2px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(110, 131, 145, 0);
+  content: "";
+  transform: translateY(-50%);
+  transition: background 140ms ease;
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after {
+  background: rgba(110, 131, 145, 0.55);
 }
 
 /* MCP server rows */
@@ -1401,6 +1434,10 @@ textarea:focus {
     box-shadow: 18px 0 44px rgba(69, 82, 93, 0.14);
     transform: translateX(0);
     transition: transform 160ms ease;
+  }
+
+  .sidebar-resize-handle {
+    display: none;
   }
 
   .workbench-shell[data-sidebar="collapsed"] .sidebar {

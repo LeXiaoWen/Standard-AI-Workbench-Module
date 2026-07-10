@@ -1,6 +1,7 @@
 node_modules/
 frontend/node_modules/
 frontend/.next/
+frontend/.test-dist/
 frontend/out/
 .desktop-dist/
 .agent-build/

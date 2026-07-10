@@ -2,10 +2,6 @@ import type {
   AuthLoginResponse,
   AuthStatus,
   AuthUser,
-  BidArtifact,
-  BidWorkflow,
-  BidWorkflowActionResponse,
-  BidWorkflowCreateResponse,
   ChatStreamEvent,
   HealthResponse,
   ProviderModel,
@@ -22,8 +18,8 @@ let apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765"
 let authToken: string | null = null;
 let appAuthSecret: string | null = null;
 const APP_AUTH_SECRET_STORAGE_KEY = "standard-workbench-app-auth-secret";
-const LOCAL_BACKEND_RETRY_ATTEMPTS = 15;
-const LOCAL_BACKEND_RETRY_DELAY_MS = 300;
+const LOCAL_BACKEND_RETRY_ATTEMPTS = 10;
+const LOCAL_BACKEND_RETRY_DELAY_MS = 250;
 
 export function setApiBaseUrl(url: string | null | undefined): void {
   if (url) apiBaseUrl = url.replace(/\/$/, "");
@@ -87,6 +83,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw localBackendConnectionError();
   }
   if (!response.ok) {
+    if (response.status === 401 && authToken && !path.startsWith("/api/v1/auth/")) {
+      window.dispatchEvent(new Event("ai-workbench-auth-expired"));
+    }
     let detail = `请求失败：${response.status}`;
     try {
       const payload = await response.json();
@@ -107,8 +106,8 @@ export function getAuthStatus(): Promise<AuthStatus> {
   return request<AuthStatus>("/api/v1/auth/status");
 }
 
-export function setupAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
-  return request<AuthLoginResponse>("/api/v1/auth/setup", {
+export function registerAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
+  return request<AuthLoginResponse>("/api/v1/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -243,116 +242,6 @@ export function updateWebSearchConfig(input: {
 
 export function cancelChat(runId: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/v1/chat/${runId}/cancel`, { method: "POST" });
-}
-
-export function createBidWorkflow(input: {
-  conversation_id: string;
-  provider_profile_id: string;
-  file: File;
-  onProgress?: (progress: number) => void;
-}): Promise<BidWorkflowCreateResponse> {
-  const formData = new FormData();
-  formData.append("conversation_id", input.conversation_id);
-  formData.append("provider_profile_id", input.provider_profile_id);
-  formData.append("file", input.file);
-
-  if (!input.onProgress) {
-    return request<BidWorkflowCreateResponse>("/api/v1/bid-workflows", {
-      method: "POST",
-      body: formData,
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${apiBaseUrl}/api/v1/bid-workflows`);
-    if (authToken) xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
-    if (appAuthSecret) xhr.setRequestHeader("X-App-Auth-Secret", appAuthSecret);
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      input.onProgress?.(Math.min(99, Math.round((event.loaded / event.total) * 100)));
-    };
-    xhr.onerror = () => reject(new Error(`无法连接本地后端：${apiBaseUrl}。请确认桌面应用后端已启动，或检查当前页面地址是否被 CORS 允许。`));
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        input.onProgress?.(100);
-        resolve(JSON.parse(xhr.responseText) as BidWorkflowCreateResponse);
-        return;
-      }
-      let detail = `请求失败：${xhr.status}`;
-      try {
-        const payload = JSON.parse(xhr.responseText);
-        detail = payload.detail ?? detail;
-      } catch {
-        // Keep the status fallback when the body is not JSON.
-      }
-      reject(new Error(detail));
-    };
-    xhr.send(formData);
-  });
-}
-
-export function getBidWorkflow(workflowId: string): Promise<BidWorkflow> {
-  return request<BidWorkflow>(`/api/v1/bid-workflows/${workflowId}`);
-}
-
-export function listBidWorkflows(conversationId?: string): Promise<BidWorkflow[]> {
-  const suffix = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : "";
-  return request<BidWorkflow[]>(`/api/v1/bid-workflows${suffix}`);
-}
-
-export function extractBidWorkflow(workflowId: string): Promise<BidWorkflowActionResponse> {
-  return request<BidWorkflowActionResponse>(`/api/v1/bid-workflows/${workflowId}/extract`, { method: "POST" });
-}
-
-export function confirmBidWorkflow(workflowId: string, text: string): Promise<BidWorkflowActionResponse> {
-  return request<BidWorkflowActionResponse>(`/api/v1/bid-workflows/${workflowId}/confirm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-}
-
-export function generateBidWorkflow(
-  workflowId: string,
-  input: {
-    template_choice: "auto" | "12-chapter" | "5-chapter" | string;
-    extra_context?: string;
-  },
-): Promise<BidWorkflowActionResponse> {
-  return request<BidWorkflowActionResponse>(`/api/v1/bid-workflows/${workflowId}/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function cancelBidWorkflow(workflowId: string): Promise<BidWorkflowActionResponse> {
-  return request<BidWorkflowActionResponse>(`/api/v1/bid-workflows/${workflowId}/cancel`, { method: "POST" });
-}
-
-export function listBidArtifacts(workflowId: string): Promise<BidArtifact[]> {
-  return request<BidArtifact[]>(`/api/v1/bid-workflows/${workflowId}/artifacts`);
-}
-
-export function downloadBidArtifactUrl(workflowId: string, artifactName: string): string {
-  return `${apiBaseUrl}/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}`;
-}
-
-export function downloadBidZipUrl(workflowId: string): string {
-  return `${apiBaseUrl}/api/v1/bid-workflows/${workflowId}/export.zip`;
-}
-
-export async function downloadBidArtifact(workflowId: string, artifactName: string): Promise<Blob> {
-  const response = await fetch(downloadBidArtifactUrl(workflowId, artifactName), withAuthHeaders());
-  if (!response.ok) throw new Error(`下载失败：${response.status}`);
-  return response.blob();
-}
-
-export async function downloadBidZip(workflowId: string): Promise<Blob> {
-  const response = await fetch(downloadBidZipUrl(workflowId), withAuthHeaders());
-  if (!response.ok) throw new Error(`下载失败：${response.status}`);
-  return response.blob();
 }
 
 export function parseSseChunk(chunk: string): ChatStreamEvent[] {

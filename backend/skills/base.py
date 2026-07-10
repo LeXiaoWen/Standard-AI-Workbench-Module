@@ -26,11 +26,11 @@ class SkillAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run_stage(self, workflow: Workflow, input_text: str = "") -> tuple[Workflow, str]:
+    def run_stage(self, user_id: str, workflow: Workflow, input_text: str = "") -> tuple[Workflow, str]:
         raise NotImplementedError
 
     @abstractmethod
-    def confirm_stage(self, workflow: Workflow, text: str = "") -> tuple[Workflow, str]:
+    def confirm_stage(self, user_id: str, workflow: Workflow, text: str = "") -> tuple[Workflow, str]:
         raise NotImplementedError
 
     @abstractmethod

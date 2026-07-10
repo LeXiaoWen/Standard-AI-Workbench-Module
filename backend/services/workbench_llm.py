@@ -16,17 +16,18 @@ from .workbench_store import workbench_store
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o"
 
-_cancel_events: dict[str, asyncio.Event] = {}
+_cancel_events: dict[str, tuple[str, asyncio.Event]] = {}
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def cancel_run(run_id: str) -> bool:
-    event = _cancel_events.get(run_id)
-    if not event:
+def cancel_run(user_id: str, run_id: str) -> bool:
+    run = _cancel_events.get(run_id)
+    if not run or run[0] != user_id:
         return False
+    event = run[1]
     event.set()
     return True
 
@@ -46,20 +47,21 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
-async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
-    profile = workbench_store.get_provider_profile(request.provider_profile_id) if request.provider_profile_id else None
+async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
+    profile = workbench_store.get_provider_profile(user_id, request.provider_profile_id) if request.provider_profile_id else None
     model = request.model or (profile.model if profile else DEFAULT_MODEL)
     base_url = profile.base_url if profile else DEFAULT_BASE_URL
-    api_key = workbench_store.resolve_api_key(request.provider_profile_id, request.api_key)
+    api_key = workbench_store.resolve_api_key(user_id, request.provider_profile_id, request.api_key)
 
     if not api_key:
         yield sse_event("error", {"type": "missing_api_key", "message": "请先配置 API key。"})
         return
 
     if request.conversation_id:
-        conversation = workbench_store.get_conversation(request.conversation_id)
+        conversation = workbench_store.get_conversation(user_id, request.conversation_id)
     else:
         conversation = workbench_store.create_conversation(
+            user_id,
             WorkbenchConversationCreate(
                 project_id=request.project_id,
                 title=request.message.strip()[:32] or "新对话",
@@ -68,12 +70,12 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             )
         )
 
-    previous_messages = workbench_store.list_messages(conversation.id)
-    user_message = workbench_store.add_message(conversation.id, "user", request.message)
-    assistant_message = workbench_store.add_message(conversation.id, "assistant", "", status="streaming", model=model)
+    previous_messages = workbench_store.list_messages(user_id, conversation.id)
+    user_message = workbench_store.add_message(user_id, conversation.id, "user", request.message)
+    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model)
     run_id = str(uuid4())
     cancel_event = asyncio.Event()
-    _cancel_events[run_id] = cancel_event
+    _cancel_events[run_id] = (user_id, cancel_event)
 
     yield sse_event(
         "message_start",
@@ -101,7 +103,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
         system_parts.append(request.system_prompt)
     if request.web_search_enabled:
         try:
-            search_results = await tavily_search(request.message)
+            search_results = await tavily_search(user_id, request.message)
             system_parts.append(build_search_context(search_results))
         except Exception as exc:
             message = str(exc)
@@ -130,7 +132,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
 
     try:
         client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
-        tool_specs = build_tool_specs(request.mcp_server_ids)
+        tool_specs = build_tool_specs(user_id, request.mcp_server_ids)
         tool_by_name = {spec.schema_name: spec for spec in tool_specs}
         create_kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if tool_specs:
@@ -141,7 +143,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
         async for chunk in stream:
             if cancel_event.is_set():
                 final_content = "".join(content_parts)
-                workbench_store.update_message(assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
+                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
                 yield sse_event(
                     "message_done",
                     {
@@ -184,7 +186,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             tool_name = str(first_tool.get("name") or "")
             spec = tool_by_name.get(tool_name)
             if not spec:
-                workbench_store.update_message(assistant_message.id, final_content, "error", error=f"模型请求了未启用的工具：{tool_name}")
+                workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=f"模型请求了未启用的工具：{tool_name}")
                 yield sse_event(
                     "error",
                     {
@@ -198,6 +200,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
                 return
             arguments = _parse_tool_arguments(str(first_tool.get("arguments") or ""))
             tool_call = workbench_store.create_tool_call(
+                user_id=user_id,
                 conversation_id=conversation.id,
                 message_id=assistant_message.id,
                 provider_tool_call_id=str(first_tool.get("id") or f"call_{uuid4().hex}"),
@@ -206,7 +209,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
                 server_id=spec.server_id,
                 arguments=arguments,
             )
-            workbench_store.update_message(assistant_message.id, final_content, "tool_pending", finish_reason="tool_calls")
+            workbench_store.update_message(user_id, assistant_message.id, final_content, "tool_pending", finish_reason="tool_calls")
             yield sse_event(
                 "tool_call_pending",
                 {
@@ -222,7 +225,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             )
             return
 
-        workbench_store.update_message(assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
         yield sse_event(
             "message_done",
             {
@@ -237,7 +240,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
     except Exception as exc:
         final_content = "".join(content_parts)
         message = str(exc)
-        workbench_store.update_message(assistant_message.id, final_content, "error", error=message)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=message)
         yield sse_event(
             "error",
             {
@@ -252,28 +255,28 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
         _cancel_events.pop(run_id, None)
 
 
-def approve_tool_call(tool_call_id: str) -> dict[str, Any]:
-    record = workbench_store.get_tool_call(tool_call_id)
+def approve_tool_call(user_id: str, tool_call_id: str) -> dict[str, Any]:
+    record = workbench_store.get_tool_call(user_id, tool_call_id)
     if record.status == "pending":
-        record = workbench_store.update_tool_call(tool_call_id, "approved")
+        record = workbench_store.update_tool_call(user_id, tool_call_id, "approved")
     return {"ok": True, "status": record.status}
 
 
-def reject_tool_call(tool_call_id: str) -> dict[str, Any]:
-    record = workbench_store.get_tool_call(tool_call_id)
+def reject_tool_call(user_id: str, tool_call_id: str) -> dict[str, Any]:
+    record = workbench_store.get_tool_call(user_id, tool_call_id)
     if record.status in {"pending", "approved"}:
-        record = workbench_store.update_tool_call(tool_call_id, "rejected", result="用户拒绝执行该工具调用。")
+        record = workbench_store.update_tool_call(user_id, tool_call_id, "rejected", result="用户拒绝执行该工具调用。")
     return {"ok": True, "status": record.status}
 
 
-async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
-    record = workbench_store.get_tool_call(tool_call_id)
-    assistant_message = workbench_store.get_message(record.message_id)
-    conversation = workbench_store.get_conversation(record.conversation_id)
-    profile = workbench_store.get_provider_profile(conversation.provider_profile_id) if conversation.provider_profile_id else None
+async def resume_tool_call_stream(user_id: str, tool_call_id: str) -> AsyncIterator[str]:
+    record = workbench_store.get_tool_call(user_id, tool_call_id)
+    assistant_message = workbench_store.get_message(user_id, record.message_id)
+    conversation = workbench_store.get_conversation(user_id, record.conversation_id)
+    profile = workbench_store.get_provider_profile(user_id, conversation.provider_profile_id) if conversation.provider_profile_id else None
     model = conversation.model or (profile.model if profile else DEFAULT_MODEL)
     base_url = profile.base_url if profile else DEFAULT_BASE_URL
-    api_key = workbench_store.resolve_api_key(conversation.provider_profile_id)
+    api_key = workbench_store.resolve_api_key(user_id, conversation.provider_profile_id)
     if not api_key:
         yield sse_event("error", {"conversation_id": conversation.id, "message_id": assistant_message.id, "type": "missing_api_key", "message": "请先配置 API key。"})
         return
@@ -293,7 +296,7 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
     tool_result = record.result or ""
     if record.status == "approved":
         try:
-            workbench_store.update_tool_call(record.id, "running")
+            workbench_store.update_tool_call(user_id, record.id, "running")
             yield sse_event(
                 "tool_call_result",
                 {
@@ -303,8 +306,8 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
                     "status": "running",
                 },
             )
-            tool_result = await execute_tool_call(record)
-            record = workbench_store.update_tool_call(record.id, "done", result=tool_result)
+            tool_result = await execute_tool_call(user_id, record)
+            record = workbench_store.update_tool_call(user_id, record.id, "done", result=tool_result)
             yield sse_event(
                 "tool_call_result",
                 {
@@ -317,7 +320,7 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
             )
         except Exception as exc:
             tool_result = f"工具执行失败：{exc}"
-            record = workbench_store.update_tool_call(record.id, "failed", result=tool_result, error=str(exc))
+            record = workbench_store.update_tool_call(user_id, record.id, "failed", result=tool_result, error=str(exc))
             yield sse_event(
                 "tool_call_error",
                 {
@@ -342,7 +345,7 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
         tool_result = record.result or tool_result
 
     history: list[dict[str, Any]] = []
-    for message in workbench_store.list_messages(conversation.id):
+    for message in workbench_store.list_messages(user_id, conversation.id):
         if message.id == assistant_message.id:
             break
         if message.status != "error" and message.role in {"system", "user", "assistant"}:
@@ -382,7 +385,7 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
             content_parts.append(delta)
             yield sse_event("delta", {"conversation_id": conversation.id, "message_id": assistant_message.id, "delta": delta})
         final_content = "".join(content_parts)
-        workbench_store.update_message(assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
         yield sse_event(
             "message_done",
             {
@@ -396,7 +399,7 @@ async def resume_tool_call_stream(tool_call_id: str) -> AsyncIterator[str]:
         )
     except Exception as exc:
         final_content = "".join(content_parts)
-        workbench_store.update_message(assistant_message.id, final_content, "error", error=str(exc))
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=str(exc))
         yield sse_event(
             "error",
             {

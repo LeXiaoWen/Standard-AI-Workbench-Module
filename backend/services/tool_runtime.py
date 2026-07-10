@@ -40,14 +40,14 @@ def mcp_schema_name(server_id: str, tool_name: str) -> str:
     return f"mcp_{server_id[:8].replace('-', '_')}_{_sanitize_tool_name(tool_name)}"
 
 
-def build_tool_specs(mcp_server_ids: list[str] | None = None) -> list[ToolSpec]:
+def build_tool_specs(user_id: str, mcp_server_ids: list[str] | None = None) -> list[ToolSpec]:
     specs: list[ToolSpec] = []
 
     selected = set(mcp_server_ids or [])
-    for server in workbench_store.list_mcp_servers(include_disabled=False):
+    for server in workbench_store.list_mcp_servers(user_id, include_disabled=False):
         if selected and server.id not in selected:
             continue
-        for tool in workbench_store.list_mcp_tools(server.id):
+        for tool in workbench_store.list_mcp_tools(user_id, server.id):
             schema_name = mcp_schema_name(server.id, tool.name)
             specs.append(
                 ToolSpec(
@@ -152,21 +152,21 @@ class McpStdioClient:
         return json.loads(body.decode("utf-8"))
 
 
-async def refresh_mcp_tools(server_id: str) -> list[dict[str, Any]]:
-    server = workbench_store.get_mcp_server(server_id, masked=False)
+async def refresh_mcp_tools(user_id: str, server_id: str) -> list[dict[str, Any]]:
+    server = workbench_store.get_mcp_server(user_id, server_id, masked=False)
     async with McpStdioClient(server) as client:
         result = await client.request("tools/list")
     tools = result.get("tools", [])
     if not isinstance(tools, list):
         raise RuntimeError("MCP server tools/list 返回格式无效。")
-    workbench_store.replace_mcp_tools(server_id, tools)
+    workbench_store.replace_mcp_tools(user_id, server_id, tools)
     return tools
 
 
-async def run_mcp_tool(server_id: str, schema_name: str, arguments: dict[str, Any]) -> str:
-    server = workbench_store.get_mcp_server(server_id, masked=False)
+async def run_mcp_tool(user_id: str, server_id: str, schema_name: str, arguments: dict[str, Any]) -> str:
+    server = workbench_store.get_mcp_server(user_id, server_id, masked=False)
     real_tool_name = None
-    for tool in workbench_store.list_mcp_tools(server_id):
+    for tool in workbench_store.list_mcp_tools(user_id, server_id):
         if mcp_schema_name(server_id, tool.name) == schema_name:
             real_tool_name = tool.name
             break
@@ -177,7 +177,7 @@ async def run_mcp_tool(server_id: str, schema_name: str, arguments: dict[str, An
     return _truncate_text(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-async def execute_tool_call(record: ToolCallRecord) -> str:
+async def execute_tool_call(user_id: str, record: ToolCallRecord) -> str:
     if record.tool_kind == "mcp" and record.server_id:
-        return await run_mcp_tool(record.server_id, record.tool_name, record.arguments)
+        return await run_mcp_tool(user_id, record.server_id, record.tool_name, record.arguments)
     raise ValueError(f"不支持的工具调用：{record.tool_kind}")

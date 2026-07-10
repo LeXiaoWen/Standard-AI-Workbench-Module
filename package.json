@@ -62,7 +62,6 @@
     "mac": {
       "category": "public.app-category.productivity",
       "identity": null,
-      "icon": "packaging/icons/icon.icns",
       "target": [
         "zip",
         "dmg"
@@ -85,7 +84,6 @@
       ]
     },
     "win": {
-      "icon": "packaging/icons/icon.ico",
       "artifactName": "${productName}-${version}-win-${arch}.${ext}",
       "requestedExecutionLevel": "asInvoker",
       "target": [

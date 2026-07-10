@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
 from pathlib import Path
 
 
@@ -14,6 +15,12 @@ hiddenimports = [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
 ]
+
+if sys.platform == "win32":
+    hiddenimports.extend([
+        "asyncio.windows_events",
+        "selectors",
+    ])
 
 a = Analysis(
     [str(entry_script)],
@@ -43,8 +50,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="ai-workbench-agent",
     debug=False,
     bootloader_ignore_signals=False,
@@ -52,20 +60,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="ai-workbench-agent",
 )

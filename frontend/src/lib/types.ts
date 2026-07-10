@@ -36,7 +36,6 @@ export type ProviderProfile = {
   display_name: string;
   base_url: string;
   model: string;
-  credential_key: string;
   has_key: boolean;
   created_at: string;
   updated_at: string;
@@ -59,40 +58,6 @@ export type ProviderModelsResponse = {
   models: ProviderModel[];
 };
 
-export type BidWorkflowStatus = "uploaded" | "extracting" | "extraction_ready" | "generating" | "completed" | "failed" | "cancelled";
-
-export type BidArtifact = {
-  name: string;
-  size: number;
-  kind: "extraction" | "proposal" | "drawing" | "spec" | "file" | string;
-};
-
-export type BidWorkflow = {
-  id: string;
-  project_id: string;
-  conversation_id: string;
-  provider_profile_id?: string | null;
-  file_name: string;
-  extracted_markdown: string;
-  confirmation_text: string;
-  template_choice?: string | null;
-  status: BidWorkflowStatus;
-  error?: string | null;
-  artifacts: BidArtifact[];
-  created_at: string;
-  updated_at: string;
-};
-
-export type BidWorkflowCreateResponse = BidWorkflow & {
-  char_count: number;
-  message: string;
-};
-
-export type BidWorkflowActionResponse = {
-  workflow: BidWorkflow;
-  message: string;
-};
-
 export type SearchResult = {
   kind: string;
   id: string;
@@ -111,9 +76,9 @@ export type HealthResponse = {
 };
 
 export type AuthStatus = {
-  setup_required: boolean;
   authenticated: boolean;
   username?: string | null;
+  registration_allowed: boolean;
 };
 
 export type AuthLoginResponse = {

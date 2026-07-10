@@ -71,7 +71,6 @@ class ProviderProfile(BaseModel):
     display_name: str
     base_url: str
     model: str
-    credential_key: str
     has_key: bool = False
     created_at: str
     updated_at: str
@@ -199,13 +198,12 @@ class SearchResult(BaseModel):
 
 
 class AuthStatus(BaseModel):
-    setup_required: bool
     authenticated: bool = False
     username: Optional[str] = None
-    existing_username: Optional[str] = None
+    registration_allowed: bool = True
 
 
-class AuthSetupRequest(BaseModel):
+class AuthRegisterRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=6)
 
