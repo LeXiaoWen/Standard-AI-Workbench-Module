@@ -327,6 +327,15 @@ export default function Home() {
   }, [userPanelOpen]);
 
   useEffect(() => {
+    if (!knowledgeOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setKnowledgeOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [knowledgeOpen]);
+
+  useEffect(() => {
     setModelMenuOpen(false);
     setProviderModels([]);
   }, [currentProfileId]);
@@ -407,8 +416,8 @@ export default function Home() {
   }
 
   async function openKnowledgePanel() {
-    setSidebarCollapsed(false);
     setConfigOpen(false);
+    setUserPanelOpen(false);
     setKnowledgeOpen((current) => !current);
     if (!knowledgeOpen) {
       try { await refreshKnowledge(); } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
@@ -985,43 +994,6 @@ export default function Home() {
           </button>
         </div>
 
-        {knowledgeOpen && !sidebarCollapsed && (
-          <section className="config-panel">
-            <div className="config-panel-header">
-              <div>
-                <strong>知识库</strong>
-                <span>当前项目的本地资料与 Wiki 页面</span>
-              </div>
-              <button type="button" onClick={() => setKnowledgeOpen(false)} aria-label="关闭知识库">
-                <X size={17} />
-              </button>
-            </div>
-            <div className="config-panel-scroll">
-              <div className="config-section">
-              <div className="config-section-title">LLM Wiki 知识库</div>
-              <div className="config-message">{knowledgeVault ? `${knowledgeVault.source_count} 个来源 · ${knowledgeVault.page_count} 个 Wiki 页面` : "加载中"}</div>
-              <input ref={knowledgeFileInput} type="file" accept=".pdf,.docx,.txt,.md" hidden onChange={selectKnowledgeFile} />
-              <div className="config-actions">
-                <button type="button" onClick={() => knowledgeFileInput.current?.click()} disabled={!currentProjectId}>导入资料</button>
-                <button type="button" onClick={() => knowledgeVault && window.standardWorkbench?.openPath(knowledgeVault.path)}>打开目录</button>
-              </div>
-              {knowledgeDrafts.filter((draft) => draft.status === "waiting_confirmation").map((draft) => (
-                <div className="config-message" key={draft.id}>
-                  <strong>待确认草案（{draft.patches.length} 页）</strong>
-                  {draft.patches.map((patch) => <div key={patch.path}>{patch.path}</div>)}
-                  <div className="config-actions">
-                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, false)}>拒绝</button>
-                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, true)}>确认写入</button>
-                  </div>
-                </div>
-              ))}
-              {knowledgeSources.slice(0, 6).map((source) => <div className="config-message" key={source.id}>{source.filename} · {source.status}</div>)}
-              {knowledgePages.filter((page) => page.path !== "log.md" && page.path !== "index.md").slice(0, 5).map((page) => <div className="config-message" key={page.path}>{page.title}</div>)}
-              </div>
-            </div>
-          </section>
-        )}
-
         <div className="sidebar-section">
           {!sidebarCollapsed && (
             <button className="section-label section-toggle" onClick={() => setProjectsOpen((current) => !current)}>
@@ -1356,6 +1328,53 @@ export default function Home() {
                   </button>
                 </div>
               </form>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {knowledgeOpen && (
+        <div className="config-modal-backdrop" onClick={() => setKnowledgeOpen(false)}>
+          <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="knowledge-modal-title" onClick={(event) => event.stopPropagation()}>
+            <div className="config-panel-header">
+              <div>
+                <strong id="knowledge-modal-title">知识库</strong>
+                <span>当前项目的本地资料与 LLM Wiki 页面</span>
+              </div>
+              <button type="button" onClick={() => setKnowledgeOpen(false)} aria-label="关闭知识库">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="config-panel-scroll">
+              <div className="config-section">
+                <div className="config-section-title">LLM Wiki 知识库</div>
+                <div className="config-message">{knowledgeVault ? `${knowledgeVault.source_count} 个来源 · ${knowledgeVault.page_count} 个 Wiki 页面` : "加载中"}</div>
+                <input ref={knowledgeFileInput} type="file" accept=".pdf,.docx,.txt,.md" hidden onChange={selectKnowledgeFile} />
+                <div className="config-actions">
+                  <button type="button" onClick={() => knowledgeFileInput.current?.click()} disabled={!currentProjectId}>导入资料</button>
+                  <button type="button" onClick={() => knowledgeVault && window.standardWorkbench?.openPath(knowledgeVault.path)}>打开目录</button>
+                </div>
+              </div>
+
+              {knowledgeDrafts.filter((draft) => draft.status === "waiting_confirmation").map((draft) => (
+                <div className="config-section" key={draft.id}>
+                  <div className="config-section-title">待确认草案（{draft.patches.length} 页）</div>
+                  <div className="config-message">{draft.patches.map((patch) => <div key={patch.path}>{patch.path}</div>)}</div>
+                  <div className="config-actions">
+                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, false)}>拒绝</button>
+                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, true)}>确认写入</button>
+                  </div>
+                </div>
+              ))}
+
+              <div className="config-section">
+                <div className="config-section-title">来源</div>
+                {knowledgeSources.length === 0 ? <div className="config-message">尚未导入资料。</div> : knowledgeSources.slice(0, 12).map((source) => <div className="config-message" key={source.id}>{source.filename} · {source.status}</div>)}
+              </div>
+              <div className="config-section">
+                <div className="config-section-title">Wiki 页面</div>
+                {knowledgePages.filter((page) => page.path !== "log.md" && page.path !== "index.md").length === 0 ? <div className="config-message">确认草案后将显示 Wiki 页面。</div> : knowledgePages.filter((page) => page.path !== "log.md" && page.path !== "index.md").slice(0, 12).map((page) => <div className="config-message" key={page.path}>{page.title}</div>)}
+              </div>
             </div>
           </section>
         </div>
