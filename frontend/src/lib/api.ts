@@ -4,6 +4,11 @@ import type {
   AuthUser,
   ChatStreamEvent,
   HealthResponse,
+  KnowledgeDraft,
+  KnowledgeLintReport,
+  KnowledgePage,
+  KnowledgeSource,
+  KnowledgeVault,
   ProviderModel,
   ProviderProfile,
   SearchResult,
@@ -98,12 +103,36 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestOnce(path: string, options?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+  } catch {
+    throw localBackendConnectionError();
+  }
+}
+
+/** 状态轮询由调用方控制重试节奏，避免一次请求阻塞登录界面。 */
+async function quickRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await requestOnce(path, options);
+  if (!response.ok) {
+    let detail = `请求失败：${response.status}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail ?? detail;
+    } catch {
+      // Keep the status fallback.
+    }
+    throw new Error(detail);
+  }
+  return response.json() as Promise<T>;
+}
+
 export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
 }
 
 export function getAuthStatus(): Promise<AuthStatus> {
-  return request<AuthStatus>("/api/v1/auth/status");
+  return quickRequest<AuthStatus>("/api/v1/auth/status");
 }
 
 export function registerAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
@@ -223,6 +252,15 @@ export async function listProviderModels(profileId: string): Promise<ProviderMod
 export function searchWorkbench(query: string): Promise<SearchResult[]> {
   return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}`);
 }
+
+export function getKnowledgeVault(projectId: string): Promise<KnowledgeVault> { return request<KnowledgeVault>(`/api/v1/projects/${projectId}/knowledge-vault`); }
+export function listKnowledgeSources(projectId: string): Promise<KnowledgeSource[]> { return request<KnowledgeSource[]>(`/api/v1/projects/${projectId}/knowledge-sources`); }
+export async function uploadKnowledgeSource(projectId: string, file: File): Promise<KnowledgeSource> { const body = new FormData(); body.append("file", file); return request<KnowledgeSource>(`/api/v1/projects/${projectId}/knowledge-sources`, { method: "POST", body }); }
+export function compileKnowledgeSource(projectId: string, sourceId: string, providerProfileId?: string): Promise<KnowledgeDraft> { const body = new FormData(); if (providerProfileId) body.append("provider_profile_id", providerProfileId); return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-sources/${sourceId}/compile`, { method: "POST", body }); }
+export function listKnowledgeDrafts(projectId: string): Promise<KnowledgeDraft[]> { return request<KnowledgeDraft[]>(`/api/v1/projects/${projectId}/knowledge-drafts`); }
+export function confirmKnowledgeDraft(projectId: string, draftId: string, approved: boolean): Promise<KnowledgeDraft> { const body = new FormData(); body.append("approved", String(approved)); return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-drafts/${draftId}/confirm`, { method: "POST", body }); }
+export function listKnowledgePages(projectId: string, query = ""): Promise<KnowledgePage[]> { return request<KnowledgePage[]>(`/api/v1/projects/${projectId}/knowledge-pages?q=${encodeURIComponent(query)}`); }
+export function lintKnowledgeVault(projectId: string): Promise<KnowledgeLintReport> { return request<KnowledgeLintReport>(`/api/v1/projects/${projectId}/knowledge-lint`); }
 
 export function getWebSearchConfig(): Promise<WebSearchConfig> {
   return request<WebSearchConfig>("/api/v1/web-search-config");

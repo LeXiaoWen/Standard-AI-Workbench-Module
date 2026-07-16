@@ -17,6 +17,7 @@ function command(name) {
 }
 
 function run(cmd, args) {
+  // 仅 .cmd/.bat 文件需要 shell；直接使用 .exe 时开启 shell 会截断含空格路径。
   const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
   const result = spawnSync(cmd, args, {
     cwd: projectRoot,
@@ -83,6 +84,7 @@ try {
     builderArgs.push("--config", tempConfig);
   }
 
+  run(process.execPath, ["scripts/sync-version.mjs"]);
   run(command("npm"), ["run", "build"]);
   run(command("npm"), ["run", "build:agent"]);
   run(process.execPath, ["scripts/run-electron-builder.mjs", ...builderArgs]);

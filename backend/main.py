@@ -2,7 +2,7 @@ import os
 import re
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from dotenv import load_dotenv
@@ -18,6 +18,11 @@ from .schemas import (
     ChatStreamRequest,
     McpServerCreate,
     McpServerUpdate,
+    KnowledgeDraft,
+    KnowledgeLintReport,
+    KnowledgePage,
+    KnowledgeSource,
+    KnowledgeVault,
     ProviderModelsResponse,
     ProviderProfileCreate,
     ProviderProfileUpdate,
@@ -35,6 +40,8 @@ from .schemas import (
     WorkbenchProjectUpdate,
 )
 from .services.artifacts import make_zip
+from .services.app_version import get_app_version
+from .services.knowledge_base import knowledge_base
 from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, register_user, user_from_token
 from .services.config import API_PRESETS
 from .services.provider_models import list_provider_models as fetch_provider_models
@@ -165,7 +172,7 @@ def health():
     return {
         "ok": True,
         "app": "standard-ai-workbench-module",
-        "version": "0.1.0",
+        "version": get_app_version(),
         "database": str(db_path()),
         "presets": API_PRESETS,
     }
@@ -343,6 +350,99 @@ def delete_provider_profile(profile_id: str, request: Request):
 @app.get("/api/v1/search")
 def search_workbench(request: Request, q: str = Query(default="")):
     return workbench_store.search(current_user(request).id, q)
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-vault", response_model=KnowledgeVault)
+def get_knowledge_vault(project_id: str, request: Request):
+    try:
+        return knowledge_base.vault(current_user(request).id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-sources", response_model=list[KnowledgeSource])
+def list_knowledge_sources(project_id: str, request: Request):
+    try:
+        return knowledge_base.list_sources(current_user(request).id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+
+
+@app.post("/api/v1/projects/{project_id}/knowledge-sources", response_model=KnowledgeSource)
+async def upload_knowledge_source(
+    project_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+):
+    try:
+        if not file.filename:
+            raise ValueError("请选择要导入的文件。")
+        return knowledge_base.upload(current_user(request).id, project_id, file.filename, await read_upload_with_limit(file))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-drafts", response_model=list[KnowledgeDraft])
+def list_knowledge_drafts(project_id: str, request: Request):
+    try:
+        return knowledge_base.list_drafts(current_user(request).id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+
+
+@app.post("/api/v1/projects/{project_id}/knowledge-sources/{source_id}/compile", response_model=KnowledgeDraft)
+def compile_knowledge_source(project_id: str, source_id: str, request: Request, provider_profile_id: str | None = Form(default=None)):
+    try:
+        return knowledge_base.create_draft(current_user(request).id, project_id, source_id, provider_profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="知识来源不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-drafts/{draft_id}", response_model=KnowledgeDraft)
+def get_knowledge_draft(project_id: str, draft_id: str, request: Request):
+    try:
+        return knowledge_base.get_draft(current_user(request).id, project_id, draft_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="草案不存在。") from exc
+
+
+@app.post("/api/v1/projects/{project_id}/knowledge-drafts/{draft_id}/confirm", response_model=KnowledgeDraft)
+def confirm_knowledge_draft(project_id: str, draft_id: str, request: Request, approved: bool = Form(...)):
+    try:
+        return knowledge_base.confirm_draft(current_user(request).id, project_id, draft_id, approved)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="草案不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-pages", response_model=list[KnowledgePage])
+def list_knowledge_pages(project_id: str, request: Request, q: str = Query(default="")):
+    try:
+        return knowledge_base.pages(current_user(request).id, project_id, q)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-lint", response_model=KnowledgeLintReport)
+def lint_knowledge_vault(project_id: str, request: Request):
+    try:
+        return knowledge_base.lint(current_user(request).id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge-vault/export.zip")
+def export_knowledge_vault(project_id: str, request: Request):
+    try:
+        files = knowledge_base.export_files(current_user(request).id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+    return Response(make_zip(files), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=knowledge-vault.zip"})
 
 
 @app.get("/api/v1/skills", response_model=list[SkillMetadata])

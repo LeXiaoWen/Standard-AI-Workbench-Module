@@ -6,9 +6,11 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 os.environ["AI_WORKBENCH_DB_PATH"] = str(Path(tempfile.gettempdir()) / f"standard-ai-workbench-test-{uuid4()}.db")
+os.environ["AI_WORKBENCH_DATA_DIR"] = str(Path(tempfile.gettempdir()) / f"standard-ai-workbench-vault-{uuid4()}")
 os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 
 from backend.main import app
+from backend.services.app_version import get_app_version
 
 
 client = TestClient(app)
@@ -25,6 +27,7 @@ def test_health():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["app"] == "standard-ai-workbench-module"
+    assert response.json()["version"] == get_app_version()
 
 
 def test_auth_and_cors_guards():
@@ -54,6 +57,16 @@ def test_auth_and_cors_guards():
     )
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-private-network"] == "true"
+
+
+def test_register_rejects_duplicate_username():
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "tester", "password": "test-password"},
+        headers={"X-App-Auth-Secret": "test-app-secret"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "用户名已存在。"
 
 
 def test_project_conversation_message_and_search():
@@ -183,3 +196,43 @@ def test_accounts_are_isolated_by_user_id():
     assert second.get(f"/api/v1/projects/{project_id}").status_code == 404
     assert second.get("/api/v1/provider-profiles").json() == []
     assert all(item["project_id"] != project_id for item in second.get("/api/v1/search", params={"q": "账号 A"}).json())
+
+
+def test_knowledge_vault_upload_review_and_export():
+    project = client.post("/api/v1/projects", json={"title": "知识库项目"}).json()
+    project_id = project["id"]
+    vault = client.get(f"/api/v1/projects/{project_id}/knowledge-vault")
+    assert vault.status_code == 200
+    assert vault.json()["source_count"] == 0
+
+    uploaded = client.post(
+        f"/api/v1/projects/{project_id}/knowledge-sources",
+        files={"file": ("资料.txt", "项目名称：知识库验收\n核心要求：保留来源。", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    source = uploaded.json()
+
+    duplicate = client.post(
+        f"/api/v1/projects/{project_id}/knowledge-sources",
+        files={"file": ("副本.txt", "项目名称：知识库验收\n核心要求：保留来源。", "text/plain")},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["id"] == source["id"]
+
+    draft = client.post(f"/api/v1/projects/{project_id}/knowledge-sources/{source['id']}/compile")
+    assert draft.status_code == 200
+    assert draft.json()["status"] == "waiting_confirmation"
+    assert any(patch["path"].startswith("sources/") for patch in draft.json()["patches"])
+    assert client.get(f"/api/v1/projects/{project_id}/knowledge-pages").json()[0]["path"] == "index.md"
+
+    rejected = client.post(f"/api/v1/projects/{project_id}/knowledge-drafts/{draft.json()['id']}/confirm", data={"approved": "false"})
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "rejected"
+
+    second_draft = client.post(f"/api/v1/projects/{project_id}/knowledge-sources/{source['id']}/compile").json()
+    confirmed = client.post(f"/api/v1/projects/{project_id}/knowledge-drafts/{second_draft['id']}/confirm", data={"approved": "true"})
+    assert confirmed.status_code == 200
+    pages = client.get(f"/api/v1/projects/{project_id}/knowledge-pages", params={"q": "知识库验收"})
+    assert pages.status_code == 200
+    assert any(page["path"].startswith("sources/") for page in pages.json())
+    assert client.get(f"/api/v1/projects/{project_id}/knowledge-vault/export.zip").headers["content-type"] == "application/zip"

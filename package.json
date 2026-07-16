@@ -1,6 +1,6 @@
 {
   "name": "standard-ai-workbench-module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "main": ".desktop-dist/main.js",
   "scripts": {
@@ -23,6 +23,8 @@
     "dist:win:nsis": "node scripts/package-desktop.mjs --target win --targets nsis",
     "dist:win:zip": "node scripts/package-desktop.mjs --target win --targets zip",
     "dist:linux": "node scripts/package-desktop.mjs --target linux --targets AppImage,tar.gz",
+    "sync:version": "node scripts/sync-version.mjs",
+    "check:version": "node scripts/sync-version.mjs --check",
     "install:agent": "node scripts/setup-agent.js",
     "typecheck": "npm --prefix frontend run typecheck && npm run build:desktop",
     "test:backend": "PYTHONPATH=. pytest -p no:capture backend/tests",
@@ -54,7 +56,10 @@
       },
       {
         "from": ".agent-dist",
-        "to": "agent"
+        "to": "agent",
+        "filter": [
+          "ai-workbench-agent/**/*"
+        ]
       }
     ],
     "asar": true,
@@ -62,10 +67,6 @@
     "mac": {
       "category": "public.app-category.productivity",
       "identity": null,
-      "target": [
-        "zip",
-        "dmg"
-      ],
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "dmg": {
@@ -85,11 +86,7 @@
     },
     "win": {
       "artifactName": "${productName}-${version}-win-${arch}.${ext}",
-      "requestedExecutionLevel": "asInvoker",
-      "target": [
-        "nsis",
-        "zip"
-      ]
+      "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
       "artifactName": "${productName}-${version}-win-${arch}-setup.${ext}",
@@ -104,10 +101,6 @@
     },
     "linux": {
       "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
-      "target": [
-        "AppImage",
-        "tar.gz"
-      ],
       "category": "Office"
     }
   }

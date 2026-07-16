@@ -240,7 +240,8 @@ class WorkbenchStore:
         self._migrate_to_multi_tenant()
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
-        return self._connection.execute(sql, tuple(params))
+        with self._lock:
+            return self._connection.execute(sql, tuple(params))
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         columns = {row["name"] for row in self._execute(f"PRAGMA table_info({table})").fetchall()}
@@ -291,23 +292,26 @@ class WorkbenchStore:
     def create_user(self, username: str, password_hash: str) -> AuthUser:
         now = utc_now()
         user_id = str(uuid4())
-        with self._connection:
-            self._execute(
-                """
-                INSERT INTO users (id, username, password_hash, created_at, updated_at, last_login_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
-                """,
-                (user_id, username.strip(), password_hash, now, now),
-            )
-            has_unowned_data = self._execute(
-                "SELECT 1 FROM projects WHERE owner_user_id IS NULL UNION ALL SELECT 1 FROM provider_profiles WHERE owner_user_id IS NULL UNION ALL SELECT 1 FROM mcp_servers WHERE owner_user_id IS NULL LIMIT 1"
-            ).fetchone()
-            if has_unowned_data:
-                self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
-                self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
-                self._execute("UPDATE mcp_servers SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
-                self._rebuild_search_index()
-        self.ensure_default_project(user_id)
+        try:
+            with self._lock, self._connection:
+                self._execute(
+                    """
+                    INSERT INTO users (id, username, password_hash, created_at, updated_at, last_login_at)
+                    VALUES (?, ?, ?, ?, ?, NULL)
+                    """,
+                    (user_id, username.strip(), password_hash, now, now),
+                )
+                has_unowned_data = self._execute(
+                    "SELECT 1 FROM projects WHERE owner_user_id IS NULL UNION ALL SELECT 1 FROM provider_profiles WHERE owner_user_id IS NULL UNION ALL SELECT 1 FROM mcp_servers WHERE owner_user_id IS NULL LIMIT 1"
+                ).fetchone()
+                if has_unowned_data:
+                    self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
+                    self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
+                    self._execute("UPDATE mcp_servers SET owner_user_id = ? WHERE owner_user_id IS NULL", (user_id,))
+                    self._rebuild_search_index()
+                self.ensure_default_project(user_id)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("用户名已存在。") from exc
         return self.get_user(user_id)
 
     def get_first_user(self) -> AuthUser | None:
@@ -325,20 +329,20 @@ class WorkbenchStore:
 
     def update_user_password_hash(self, user_id: str, password_hash: str) -> AuthUser:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (password_hash, now, user_id))
             self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
         return self.get_user(user_id)
 
     def update_user_last_login(self, user_id: str) -> AuthUser:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user_id))
         return self.get_user(user_id)
 
     def create_auth_session(self, user_id: str, token_hash: str, expires_at: str) -> None:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, revoked_at)
@@ -363,7 +367,7 @@ class WorkbenchStore:
 
     def revoke_auth_session(self, token_hash: str) -> None:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL", (now, token_hash))
 
     def list_projects(self, user_id: str) -> list[WorkbenchProject]:
@@ -375,7 +379,7 @@ class WorkbenchStore:
         now = utc_now()
         title = request.title.strip() or DEFAULT_PROJECT_TITLE
         workspace_path = request.workspace_path.strip() if request.workspace_path else None
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "INSERT INTO projects (id, owner_user_id, title, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (project_id, user_id, title, workspace_path, now, now),
@@ -394,7 +398,7 @@ class WorkbenchStore:
         title = request.title.strip() if request.title is not None else project.title
         workspace_path = request.workspace_path.strip() if request.workspace_path is not None and request.workspace_path.strip() else project.workspace_path
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE projects SET title = ?, workspace_path = ?, updated_at = ? WHERE id = ? AND owner_user_id = ?",
                 (title or project.title, workspace_path, now, project_id, user_id),
@@ -405,7 +409,7 @@ class WorkbenchStore:
 
     def delete_project(self, user_id: str, project_id: str) -> None:
         self.get_project(user_id, project_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user_id))
             self._execute("DELETE FROM search_index WHERE owner_user_id = ? AND project_id = ?", (user_id, project_id))
         self.ensure_default_project(user_id)
@@ -427,7 +431,7 @@ class WorkbenchStore:
         conversation_id = str(uuid4())
         now = utc_now()
         title = request.title.strip() or "新对话"
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO conversations (id, project_id, title, provider_profile_id, model, created_at, updated_at)
@@ -454,7 +458,7 @@ class WorkbenchStore:
         provider_profile_id = request.provider_profile_id if request.provider_profile_id is not None else conversation.provider_profile_id
         model = request.model if request.model is not None else conversation.model
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE conversations SET title = ?, provider_profile_id = ?, model = ?, updated_at = ? WHERE id = ?",
                 (title or conversation.title, provider_profile_id, model, now, conversation_id),
@@ -465,7 +469,7 @@ class WorkbenchStore:
 
     def delete_conversation(self, user_id: str, conversation_id: str) -> None:
         conversation = self.get_conversation(user_id, conversation_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             self._execute("DELETE FROM search_index WHERE owner_user_id = ? AND conversation_id = ?", (user_id, conversation_id))
             self._touch_project(conversation.project_id)
@@ -479,7 +483,7 @@ class WorkbenchStore:
         conversation = self.get_conversation(user_id, conversation_id)
         message_id = str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO messages (id, conversation_id, role, content, status, model, created_at, updated_at)
@@ -515,7 +519,7 @@ class WorkbenchStore:
         conversation = self.get_conversation(user_id, message.conversation_id)
         now = utc_now()
         usage_json = json.dumps(usage, ensure_ascii=False) if usage is not None else None
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE messages
@@ -542,7 +546,7 @@ class WorkbenchStore:
     def create_provider_profile(self, user_id: str, request: ProviderProfileCreate) -> ProviderProfile:
         profile_id = str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO provider_profiles
@@ -572,7 +576,7 @@ class WorkbenchStore:
         display_name = request.display_name if request.display_name is not None else profile.display_name
         base_url = request.base_url if request.base_url is not None else profile.base_url
         model = request.model if request.model is not None else profile.model
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE provider_profiles
@@ -590,7 +594,7 @@ class WorkbenchStore:
 
     def delete_provider_profile(self, user_id: str, profile_id: str) -> None:
         profile = self.get_provider_profile(user_id, profile_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id))
             self._execute("DELETE FROM provider_credentials WHERE credential_key = ?", (profile.credential_key,))
 
@@ -655,7 +659,7 @@ class WorkbenchStore:
 
     def _set_user_setting(self, user_id: str, key: str, value: str) -> None:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO user_settings (user_id, key, value, updated_at)
@@ -681,7 +685,7 @@ class WorkbenchStore:
     def create_mcp_server(self, user_id: str, request: McpServerCreate) -> McpServer:
         server_id = str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO mcp_servers (id, owner_user_id, name, command, args_json, env_json, enabled, created_at, updated_at)
@@ -709,7 +713,7 @@ class WorkbenchStore:
         args = request.args if request.args is not None else current.args
         env = request.env if request.env is not None else current.env
         enabled = request.enabled if request.enabled is not None else current.enabled
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE mcp_servers
@@ -731,13 +735,13 @@ class WorkbenchStore:
 
     def delete_mcp_server(self, user_id: str, server_id: str) -> None:
         self.get_mcp_server(user_id, server_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM mcp_servers WHERE id = ? AND owner_user_id = ?", (server_id, user_id))
 
     def replace_mcp_tools(self, user_id: str, server_id: str, tools: list[dict[str, Any]]) -> list[McpTool]:
         self.get_mcp_server(user_id, server_id, masked=False)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM mcp_tools_cache WHERE server_id = ?", (server_id,))
             for tool in tools:
                 self._execute(
@@ -780,7 +784,7 @@ class WorkbenchStore:
             self.get_mcp_server(user_id, server_id)
         now = utc_now()
         tool_call_id = str(uuid4())
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO tool_calls
@@ -821,7 +825,7 @@ class WorkbenchStore:
     ) -> ToolCallRecord:
         self.get_tool_call(user_id, tool_call_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE tool_calls SET status = ?, result = ?, error = ?, updated_at = ? WHERE id = ?",
                 (status, result, error, now, tool_call_id),
@@ -845,7 +849,7 @@ class WorkbenchStore:
             conversation = self.create_conversation(user_id, WorkbenchConversationCreate(project_id=project_id, title=input_summary[:32] or skill_name))
         workflow_id = str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO workflows (id, skill_name, project_id, conversation_id, status, stage, input_summary, error, created_at, updated_at)
@@ -885,7 +889,7 @@ class WorkbenchStore:
     ) -> Workflow:
         workflow = self.get_workflow(user_id, workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE workflows
@@ -908,7 +912,7 @@ class WorkbenchStore:
     def save_workflow_artifacts(self, user_id: str, workflow_id: str, files: dict[str, tuple[str, str, str]]) -> list[WorkflowArtifact]:
         self.get_workflow(user_id, workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             for name, (content, kind, mime_type) in files.items():
                 self._execute(
                     """

@@ -10,3 +10,6 @@ openai>=1.0.0
 httpx>=0.27.0
 argon2-cffi>=23.1.0
 PyInstaller>=6.0.0
+langgraph>=1.0.0
+langgraph-checkpoint-sqlite>=3.0.0
+mcp>=1.27,<2

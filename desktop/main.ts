@@ -41,6 +41,11 @@ ipcMain.handle("workspace:select-directory", async () => {
   };
 });
 
+ipcMain.handle("workspace:open-path", async (_event, targetPath: string) => {
+  if (!targetPath || !path.isAbsolute(targetPath)) return false;
+  return !(await shell.openPath(targetPath));
+});
+
 ipcMain.handle("auth:get-app-secret", async () => APP_AUTH_SECRET);
 ipcMain.handle("backend:get-url", async () => backendUrl);
 

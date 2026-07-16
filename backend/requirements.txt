@@ -11,3 +11,6 @@ agno>=2.2.10
 PyPDF2>=3.0.0
 python-docx>=1.1.0
 pyinstaller>=6.0.0,<7.0.0
+langgraph>=1.0.0
+langgraph-checkpoint-sqlite>=3.0.0
+mcp>=1.27,<2

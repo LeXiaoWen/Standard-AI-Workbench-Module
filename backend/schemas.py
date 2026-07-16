@@ -301,6 +301,53 @@ class WorkflowArtifact(BaseModel):
     created_at: str
 
 
+class KnowledgeVault(BaseModel):
+    project_id: str
+    source_count: int = 0
+    page_count: int = 0
+    path: str
+
+
+class KnowledgeSource(BaseModel):
+    id: str
+    project_id: str
+    filename: str
+    content_hash: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+class KnowledgePatch(BaseModel):
+    path: str
+    operation: str
+    content: str
+
+
+class KnowledgeDraft(BaseModel):
+    id: str
+    project_id: str
+    source_id: str
+    status: str
+    patches: List[KnowledgePatch] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class KnowledgePage(BaseModel):
+    path: str
+    title: str
+    content: str
+
+
+class KnowledgeLintReport(BaseModel):
+    missing_index: List[str] = Field(default_factory=list)
+    broken_links: List[str] = Field(default_factory=list)
+    orphan_pages: List[str] = Field(default_factory=list)
+    stale_sources: List[str] = Field(default_factory=list)
+
+
 class SkillMetadata(BaseModel):
     skill_name: str
     display_name: str

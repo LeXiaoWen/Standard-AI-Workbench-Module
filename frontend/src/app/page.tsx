@@ -15,12 +15,15 @@ import {
   Settings2,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   changePassword,
   cancelChat,
+  compileKnowledgeSource,
+  confirmKnowledgeDraft,
   createConversation,
   createProject,
   createProviderProfile,
@@ -28,9 +31,13 @@ import {
   deleteProject,
   getAuthStatus,
   getMe,
+  getKnowledgeVault,
   getWebSearchConfig,
   listConversations,
   listMessages,
+  listKnowledgeDrafts,
+  listKnowledgePages,
+  listKnowledgeSources,
   listProviderModels,
   listProjects,
   listProviderProfiles,
@@ -43,6 +50,7 @@ import {
   streamChat,
   updateProviderProfile,
   updateWebSearchConfig,
+  uploadKnowledgeSource,
 } from "@/lib/api";
 import { MarkdownPane } from "@/components/MarkdownPane";
 import type {
@@ -50,6 +58,10 @@ import type {
   ChatStreamEvent,
   ProviderModel,
   ProviderProfile,
+  KnowledgeDraft,
+  KnowledgePage,
+  KnowledgeSource,
+  KnowledgeVault,
   SearchResult,
   WebSearchConfig,
   WorkbenchConversation,
@@ -95,17 +107,17 @@ function sleep(ms: number): Promise<void> {
 
 async function getAuthStatusWithRetry() {
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
     try {
       return await getAuthStatus();
     } catch (caught) {
       lastError = caught;
       const message = caught instanceof Error ? caught.message : String(caught);
       if (!message.includes("无法连接本地后端")) throw caught;
-      await sleep(500);
+      await sleep(attempt === 0 ? 100 : 500);
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  throw lastError instanceof Error ? lastError : new Error("本地后端启动超时，请重新打开应用。");
 }
 
 function relativeTime(value: string): string {
@@ -175,6 +187,7 @@ export default function Home() {
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(true);
+  const [projectConversationsOpen, setProjectConversationsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
   const [profileForm, setProfileForm] = useState(providerPresets[0]);
   const [apiKey, setApiKey] = useState("");
@@ -185,6 +198,12 @@ export default function Home() {
   const [userChatAvatar, setUserChatAvatar] = useState("我");
   const [assistantChatAvatar, setAssistantChatAvatar] = useState("AI");
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [knowledgeVault, setKnowledgeVault] = useState<KnowledgeVault | null>(null);
+  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>([]);
+  const [knowledgeDrafts, setKnowledgeDrafts] = useState<KnowledgeDraft[]>([]);
+  const [knowledgePages, setKnowledgePages] = useState<KnowledgePage[]>([]);
+  const knowledgeFileInput = useRef<HTMLInputElement>(null);
 
   const currentProject = useMemo(() => projects.find((project) => project.id === currentProjectId) ?? null, [projects, currentProjectId]);
   const currentConversation = useMemo(
@@ -351,9 +370,50 @@ export default function Home() {
 
   async function switchProject(project: WorkbenchProject) {
     setCurrentProjectId(project.id);
+    setProjectConversationsOpen(true);
     setMessages([]);
     setCurrentConversationId(null);
     await refreshConversations(project.id);
+    if (knowledgeOpen) await refreshKnowledge(project.id);
+  }
+
+  async function refreshKnowledge(projectId = currentProjectId) {
+    if (!projectId) return;
+    const [vault, sources, drafts, pages] = await Promise.all([
+      getKnowledgeVault(projectId), listKnowledgeSources(projectId), listKnowledgeDrafts(projectId), listKnowledgePages(projectId),
+    ]);
+    setKnowledgeVault(vault);
+    setKnowledgeSources(sources);
+    setKnowledgeDrafts(drafts);
+    setKnowledgePages(pages);
+  }
+
+  async function openKnowledgePanel() {
+    setSidebarCollapsed(false);
+    setConfigOpen(false);
+    setKnowledgeOpen((current) => !current);
+    if (!knowledgeOpen) {
+      try { await refreshKnowledge(); } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+    }
+  }
+
+  async function selectKnowledgeFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !currentProjectId) return;
+    try {
+      const source = await uploadKnowledgeSource(currentProjectId, file);
+      await compileKnowledgeSource(currentProjectId, source.id, currentProfileId ?? undefined);
+      await refreshKnowledge();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+    event.target.value = "";
+  }
+
+  async function reviewKnowledgeDraft(draftId: string, approved: boolean) {
+    if (!currentProjectId) return;
+    try {
+      await confirmKnowledgeDraft(currentProjectId, draftId, approved);
+      await refreshKnowledge();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
   }
 
   async function chooseWorkspaceDirectory() {
@@ -597,7 +657,9 @@ export default function Home() {
 
   function openConfigPanel() {
     setSidebarCollapsed(false);
+    setSidebarWidth((current) => Math.max(current, 320));
     setConfigOpen(true);
+    setKnowledgeOpen(false);
     setUserPanelOpen(false);
     setModelMenuOpen(false);
     setWebSearchSaveState("idle");
@@ -635,6 +697,7 @@ export default function Home() {
   async function submitAuth(event: FormEvent) {
     event.preventDefault();
     if (!authBackendReady) {
+      setError("正在连接本地后端，请稍候。");
       return;
     }
     const username = authForm.username.trim();
@@ -830,7 +893,7 @@ export default function Home() {
           <form className="auth-form" onSubmit={submitAuth}>
             <label>
               用户名
-              <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} autoComplete="username" disabled={!authBackendReady} />
+              <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} autoComplete="username" />
             </label>
             <label>
               密码
@@ -839,7 +902,6 @@ export default function Home() {
                 type="password"
                 onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })}
                 autoComplete={authMode === "register" ? "new-password" : "current-password"}
-                disabled={!authBackendReady}
               />
             </label>
             {authMode === "register" && (
@@ -850,11 +912,10 @@ export default function Home() {
                   type="password"
                   onChange={(event) => setAuthForm({ ...authForm, confirmPassword: event.target.value })}
                   autoComplete="new-password"
-                  disabled={!authBackendReady}
                 />
               </label>
             )}
-            <button type="submit" disabled={!authBackendReady}>{authMode === "register" ? "注册并进入" : "登录"}</button>
+            <button type="submit">{authMode === "register" ? "注册并进入" : "登录"}</button>
           </form>
           {!authBackendReady && !error && (
             <div className="auth-status">
@@ -903,11 +964,62 @@ export default function Home() {
             <Settings2 size={19} />
             {!sidebarCollapsed && <span>模型配置</span>}
           </button>
+          <button className="menu-command" onClick={openKnowledgePanel} title="知识库">
+            <FileText size={19} />
+            {!sidebarCollapsed && <span>知识库</span>}
+          </button>
         </div>
 
-        {configOpen && !sidebarCollapsed && (
+        {knowledgeOpen && !sidebarCollapsed && (
           <section className="config-panel">
-            <form className="config-section" onSubmit={saveProfile}>
+            <div className="config-panel-header">
+              <div>
+                <strong>知识库</strong>
+                <span>当前项目的本地资料与 Wiki 页面</span>
+              </div>
+              <button type="button" onClick={() => setKnowledgeOpen(false)} aria-label="关闭知识库">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="config-panel-scroll">
+              <div className="config-section">
+              <div className="config-section-title">LLM Wiki 知识库</div>
+              <div className="config-message">{knowledgeVault ? `${knowledgeVault.source_count} 个来源 · ${knowledgeVault.page_count} 个 Wiki 页面` : "加载中"}</div>
+              <input ref={knowledgeFileInput} type="file" accept=".pdf,.docx,.txt,.md" hidden onChange={selectKnowledgeFile} />
+              <div className="config-actions">
+                <button type="button" onClick={() => knowledgeFileInput.current?.click()} disabled={!currentProjectId}>导入资料</button>
+                <button type="button" onClick={() => knowledgeVault && window.standardWorkbench?.openPath(knowledgeVault.path)}>打开目录</button>
+              </div>
+              {knowledgeDrafts.filter((draft) => draft.status === "waiting_confirmation").map((draft) => (
+                <div className="config-message" key={draft.id}>
+                  <strong>待确认草案（{draft.patches.length} 页）</strong>
+                  {draft.patches.map((patch) => <div key={patch.path}>{patch.path}</div>)}
+                  <div className="config-actions">
+                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, false)}>拒绝</button>
+                    <button type="button" onClick={() => reviewKnowledgeDraft(draft.id, true)}>确认写入</button>
+                  </div>
+                </div>
+              ))}
+              {knowledgeSources.slice(0, 6).map((source) => <div className="config-message" key={source.id}>{source.filename} · {source.status}</div>)}
+              {knowledgePages.filter((page) => page.path !== "log.md" && page.path !== "index.md").slice(0, 5).map((page) => <div className="config-message" key={page.path}>{page.title}</div>)}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {configOpen && !sidebarCollapsed && (
+          <section className="config-panel" aria-label="模型与工具配置">
+            <div className="config-panel-header">
+              <div>
+                <strong>模型与工具配置</strong>
+                <span>模型 API、联网搜索与 MCP 仅保存在本机</span>
+              </div>
+              <button type="button" onClick={() => setConfigOpen(false)} aria-label="关闭模型配置">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="config-panel-scroll">
+              <form className="config-section" onSubmit={saveProfile}>
               <div className="config-section-title">模型配置</div>
               <div className="config-grid">
                 <label>
@@ -941,9 +1053,9 @@ export default function Home() {
                 </button>
                 <button type="submit">保存模型</button>
               </div>
-            </form>
+              </form>
 
-            <form className="config-section" onSubmit={saveWebSearchConfig}>
+              <form className="config-section" onSubmit={saveWebSearchConfig}>
               <div className="config-section-title">
                 <span>联网搜索</span>
                 <em>
@@ -1004,7 +1116,8 @@ export default function Home() {
                   {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </section>
         )}
 
@@ -1041,7 +1154,7 @@ export default function Home() {
               )}
               {projects.map((project) => (
                 <div className="project-group" key={project.id}>
-                  <div className={project.id === currentProjectId ? "sidebar-item-shell active" : "sidebar-item-shell"}>
+                  <div className={project.id === currentProjectId ? "sidebar-item-shell project-shell active" : "sidebar-item-shell project-shell"}>
                     <button
                       className="project-row"
                       onClick={() => switchProject(project)}
@@ -1050,6 +1163,16 @@ export default function Home() {
                       <FileText size={18} />
                       {!sidebarCollapsed && <span>{project.title}</span>}
                     </button>
+                    {!sidebarCollapsed && project.workspace_path && project.id === currentProjectId && (
+                      <button
+                        type="button"
+                        className="project-expand-toggle"
+                        onClick={() => setProjectConversationsOpen((current) => !current)}
+                        aria-label={projectConversationsOpen ? `收起 ${project.title} 的对话` : `展开 ${project.title} 的对话`}
+                      >
+                        <ChevronRight className={projectConversationsOpen ? "chevron open" : "chevron"} size={15} />
+                      </button>
+                    )}
                     {!sidebarCollapsed && (
                       <button type="button" className="row-delete" onClick={() => removeProject(project)} aria-label={`删除项目 ${project.title}`}>
                         <Trash2 size={14} />
@@ -1059,6 +1182,7 @@ export default function Home() {
                   {!sidebarCollapsed &&
                     project.workspace_path &&
                     project.id === currentProjectId &&
+                    projectConversationsOpen &&
                     projectPreviewConversations.map((conversation) => (
                       <div className={conversation.id === currentConversationId ? "sidebar-item-shell project-chat-shell active" : "sidebar-item-shell project-chat-shell"} key={conversation.id}>
                         <button className="project-chat-row" onClick={() => openConversation(conversation.id)} title={conversation.title}>

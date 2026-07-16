@@ -67,6 +67,13 @@ export type SearchResult = {
   project_id?: string | null;
 };
 
+export type KnowledgeVault = { project_id: string; source_count: number; page_count: number; path: string };
+export type KnowledgeSource = { id: string; project_id: string; filename: string; content_hash: string; status: string; created_at: string; updated_at: string };
+export type KnowledgePatch = { path: string; operation: string; content: string };
+export type KnowledgeDraft = { id: string; project_id: string; source_id: string; status: string; patches: KnowledgePatch[]; error?: string | null; created_at: string; updated_at: string };
+export type KnowledgePage = { path: string; title: string; content: string };
+export type KnowledgeLintReport = { missing_index: string[]; broken_links: string[]; orphan_pages: string[]; stale_sources: string[] };
+
 export type HealthResponse = {
   ok: boolean;
   app: string;

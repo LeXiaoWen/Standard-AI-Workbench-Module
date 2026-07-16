@@ -24,6 +24,30 @@
 
 ## 快速开始
 
+### 国内网络环境
+
+国内网络环境可先配置 npm 缓存与 Electron 下载镜像，再安装依赖和执行打包。配置只影响本机开发环境，不会写入应用或提交到仓库。
+
+macOS / Linux：
+
+```bash
+npm config set registry https://registry.npmmirror.com --global
+npm config set cache "$HOME/.npm-cache" --global
+export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
+export ELECTRON_BUILDER_BINARIES_MIRROR="https://registry.npmmirror.com/-/binary/electron-builder-binaries/"
+```
+
+Windows PowerShell：
+
+```powershell
+npm config set registry https://registry.npmmirror.com --global
+npm config set cache "D:\\npm-cache" --global
+[Environment]::SetEnvironmentVariable("ELECTRON_MIRROR", "https://npmmirror.com/mirrors/electron/", "User")
+[Environment]::SetEnvironmentVariable("ELECTRON_BUILDER_BINARIES_MIRROR", "https://registry.npmmirror.com/-/binary/electron-builder-binaries/", "User")
+```
+
+镜像不可用时，删除上述 Electron 环境变量并执行 `npm config delete registry --global`，恢复 npm 官方源。
+
 ```bash
 cd standard_ai_workbench_module
 python3 -m pip install -r backend/requirements.txt
@@ -91,9 +115,34 @@ npm run dist:win        # NSIS 安装包和 ZIP
 
 未签名的 macOS 应用首次打开可能需要在 Finder 中右键选择“打开”。正式分发还需分别配置 Apple 签名/公证和 Windows 代码签名。
 
+## 版本与发布
+
+根目录 `package.json` 的 `version` 是唯一发布版本源：Electron 应用元数据、安装包文件名和后端 `/health` 返回值均以它为准。前端 `package.json` 与两个 lockfile 由 `npm run sync:version` 自动同步，不能单独修改版本。
+
+版本采用 SemVer：修复使用 `patch`，新增兼容功能使用 `minor`，不兼容变更使用 `major`。发布时在目标平台完成构建：
+
+```bash
+npm version patch --no-git-tag-version
+npm run sync:version
+npm run check:version
+
+npm run test:backend
+npm run test:frontend
+npm run typecheck
+npm run dist:mac  # Windows 平台改为 npm run dist:win
+
+git add package.json package-lock.json frontend/package.json frontend/package-lock.json backend/
+git commit -m "chore(release): v0.1.1"
+git tag v0.1.1
+git push origin develop --follow-tags
+```
+
+每次 `pack` 或 `dist` 会自动执行版本同步。
+
 ## 验证
 
 ```bash
+npm run check:version
 npm run test:backend
 npm run test:frontend
 npm run typecheck
