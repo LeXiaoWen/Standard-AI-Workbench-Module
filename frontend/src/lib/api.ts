@@ -9,20 +9,34 @@ import type {
   KnowledgePage,
   KnowledgeSource,
   KnowledgeVault,
+  McpServer,
+  McpServerCreate,
+  McpServerUpdate,
+  McpTool,
   ProviderModel,
   ProviderProfile,
+  ResumeToolCallEvent,
   SearchResult,
+  SearchResultKind,
+  SkillMetadata,
+  ThemeAppearance,
+  ThemeListResponse,
+  ThemePreferences,
+  UserTheme,
   WebSearchConfig,
   WorkbenchConversation,
   WorkbenchMessage,
   WorkbenchProject,
+  Workflow,
+  WorkflowActionResponse,
+  WorkflowArtifact,
 } from "./types";
 
 let apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765";
 
 let authToken: string | null = null;
 let appAuthSecret: string | null = null;
-const APP_AUTH_SECRET_STORAGE_KEY = "standard-workbench-app-auth-secret";
+const APP_AUTH_SECRET_STORAGE_KEY = "ai-workbench-app-auth-secret";
 const LOCAL_BACKEND_RETRY_ATTEMPTS = 10;
 const LOCAL_BACKEND_RETRY_DELAY_MS = 250;
 
@@ -80,6 +94,14 @@ async function fetchWithLocalRetry(url: string, options?: RequestInit): Promise<
   throw lastError instanceof Error ? localBackendConnectionError() : localBackendConnectionError();
 }
 
+async function requestOnce(path: string, options?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+  } catch {
+    throw localBackendConnectionError();
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -103,15 +125,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function requestOnce(path: string, options?: RequestInit): Promise<Response> {
-  try {
-    return await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
-  } catch {
-    throw localBackendConnectionError();
-  }
-}
-
-/** 状态轮询由调用方控制重试节奏，避免一次请求阻塞登录界面。 */
+/** 单次请求，不重试。用于状态轮询场景，由外层控制重试节奏。 */
 async function quickRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await requestOnce(path, options);
   if (!response.ok) {
@@ -209,6 +223,21 @@ export function deleteConversation(conversationId: string): Promise<{ ok: boolea
   return request<{ ok: boolean }>(`/api/v1/conversations/${conversationId}`, { method: "DELETE" });
 }
 
+export function updateConversation(
+  conversationId: string,
+  input: {
+    title?: string;
+    provider_profile_id?: string;
+    model?: string;
+  },
+): Promise<WorkbenchConversation> {
+  return request<WorkbenchConversation>(`/api/v1/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
 export function listProviderProfiles(): Promise<ProviderProfile[]> {
   return request<ProviderProfile[]>("/api/v1/provider-profiles");
 }
@@ -249,18 +278,10 @@ export async function listProviderModels(profileId: string): Promise<ProviderMod
   return payload.models;
 }
 
-export function searchWorkbench(query: string): Promise<SearchResult[]> {
-  return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}`);
+export function searchWorkbench(query: string, kind?: SearchResultKind): Promise<SearchResult[]> {
+  const filter = kind ? `&kind=${encodeURIComponent(kind)}` : "";
+  return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}${filter}`);
 }
-
-export function getKnowledgeVault(projectId: string): Promise<KnowledgeVault> { return request<KnowledgeVault>(`/api/v1/projects/${projectId}/knowledge-vault`); }
-export function listKnowledgeSources(projectId: string): Promise<KnowledgeSource[]> { return request<KnowledgeSource[]>(`/api/v1/projects/${projectId}/knowledge-sources`); }
-export async function uploadKnowledgeSource(projectId: string, file: File): Promise<KnowledgeSource> { const body = new FormData(); body.append("file", file); return request<KnowledgeSource>(`/api/v1/projects/${projectId}/knowledge-sources`, { method: "POST", body }); }
-export function compileKnowledgeSource(projectId: string, sourceId: string, providerProfileId?: string): Promise<KnowledgeDraft> { const body = new FormData(); if (providerProfileId) body.append("provider_profile_id", providerProfileId); return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-sources/${sourceId}/compile`, { method: "POST", body }); }
-export function listKnowledgeDrafts(projectId: string): Promise<KnowledgeDraft[]> { return request<KnowledgeDraft[]>(`/api/v1/projects/${projectId}/knowledge-drafts`); }
-export function confirmKnowledgeDraft(projectId: string, draftId: string, approved: boolean): Promise<KnowledgeDraft> { const body = new FormData(); body.append("approved", String(approved)); return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-drafts/${draftId}/confirm`, { method: "POST", body }); }
-export function listKnowledgePages(projectId: string, query = ""): Promise<KnowledgePage[]> { return request<KnowledgePage[]>(`/api/v1/projects/${projectId}/knowledge-pages?q=${encodeURIComponent(query)}`); }
-export function lintKnowledgeVault(projectId: string): Promise<KnowledgeLintReport> { return request<KnowledgeLintReport>(`/api/v1/projects/${projectId}/knowledge-lint`); }
 
 export function getWebSearchConfig(): Promise<WebSearchConfig> {
   return request<WebSearchConfig>("/api/v1/web-search-config");
@@ -282,21 +303,218 @@ export function cancelChat(runId: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/v1/chat/${runId}/cancel`, { method: "POST" });
 }
 
-export function parseSseChunk(chunk: string): ChatStreamEvent[] {
-  return chunk
-    .split("\n\n")
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .map((block) => {
-      const eventLine = block.split("\n").find((line) => line.startsWith("event:"));
-      const dataLine = block.split("\n").find((line) => line.startsWith("data:"));
-      if (!eventLine || !dataLine) return null;
-      const event = eventLine.replace("event:", "").trim() as ChatStreamEvent["event"];
-      const data = JSON.parse(dataLine.replace("data:", "").trim());
-      return { event, data } as ChatStreamEvent;
-    })
-    .filter((event): event is ChatStreamEvent => event !== null);
+// ----- 主题 -----
+
+export function listThemes(): Promise<ThemeListResponse> {
+  return request<ThemeListResponse>("/api/v1/themes");
 }
+
+export function uploadTheme(input: { file: File; name?: string; appearance: ThemeAppearance }): Promise<UserTheme> {
+  const body = new FormData();
+  body.append("file", input.file);
+  body.append("name", input.name?.trim() || input.file.name.replace(/\.[^.]+$/, ""));
+  body.append("appearance", input.appearance);
+  return request<UserTheme>("/api/v1/themes", { method: "POST", body });
+}
+
+export function activateTheme(themeId: string): Promise<ThemeListResponse> {
+  return request<ThemeListResponse>("/api/v1/themes/active", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme_id: themeId }),
+  });
+}
+
+export function deleteTheme(themeId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/v1/themes/${themeId}`, { method: "DELETE" });
+}
+
+export async function downloadThemeImage(path: string): Promise<Blob> {
+  const response = await fetchWithLocalRetry(`${apiBaseUrl}${path}`, withAuthHeaders());
+  if (!response.ok) throw new Error("无法加载主题背景。");
+  return response.blob();
+}
+
+export function getThemePreferences(): Promise<ThemePreferences> {
+  return request<ThemePreferences>("/api/v1/themes/preferences");
+}
+
+export function updateThemePreferences(prefs: Partial<ThemePreferences>): Promise<ThemePreferences> {
+  return request<ThemePreferences>("/api/v1/themes/preferences", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(prefs),
+  });
+}
+
+// ----- 知识库 -----
+
+export function getKnowledgeVault(projectId: string): Promise<KnowledgeVault> {
+  return request<KnowledgeVault>(`/api/v1/projects/${projectId}/knowledge-vault`);
+}
+
+export function listKnowledgeSources(projectId: string): Promise<KnowledgeSource[]> {
+  return request<KnowledgeSource[]>(`/api/v1/projects/${projectId}/knowledge-sources`);
+}
+
+export async function uploadKnowledgeSource(projectId: string, file: File): Promise<KnowledgeSource> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<KnowledgeSource>(`/api/v1/projects/${projectId}/knowledge-sources`, { method: "POST", body });
+}
+
+export function compileKnowledgeSource(
+  projectId: string,
+  sourceId: string,
+  providerProfileId?: string,
+): Promise<KnowledgeDraft> {
+  const body = new FormData();
+  if (providerProfileId) body.append("provider_profile_id", providerProfileId);
+  return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-sources/${sourceId}/compile`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function listKnowledgeDrafts(projectId: string): Promise<KnowledgeDraft[]> {
+  return request<KnowledgeDraft[]>(`/api/v1/projects/${projectId}/knowledge-drafts`);
+}
+
+export function confirmKnowledgeDraft(projectId: string, draftId: string, approved: boolean): Promise<KnowledgeDraft> {
+  const body = new FormData();
+  body.append("approved", String(approved));
+  return request<KnowledgeDraft>(`/api/v1/projects/${projectId}/knowledge-drafts/${draftId}/confirm`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function listKnowledgePages(projectId: string, query = ""): Promise<KnowledgePage[]> {
+  return request<KnowledgePage[]>(`/api/v1/projects/${projectId}/knowledge-pages?q=${encodeURIComponent(query)}`);
+}
+
+export function lintKnowledgeVault(projectId: string): Promise<KnowledgeLintReport> {
+  return request<KnowledgeLintReport>(`/api/v1/projects/${projectId}/knowledge-lint`);
+}
+
+// ----- MCP 服务器 -----
+
+export function listMcpServers(): Promise<McpServer[]> {
+  return request<McpServer[]>("/api/v1/mcp-servers");
+}
+
+export function createMcpServer(input: McpServerCreate): Promise<McpServer> {
+  return request<McpServer>("/api/v1/mcp-servers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateMcpServer(serverId: string, input: McpServerUpdate): Promise<McpServer> {
+  return request<McpServer>(`/api/v1/mcp-servers/${serverId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteMcpServer(serverId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/v1/mcp-servers/${serverId}`, { method: "DELETE" });
+}
+
+export async function refreshMcpTools(serverId: string): Promise<McpTool[]> {
+  const payload = await request<{ tools: McpTool[] }>(`/api/v1/mcp-servers/${serverId}/refresh-tools`, {
+    method: "POST",
+  });
+  return payload.tools;
+}
+
+// ----- 通用工作流 -----
+
+export function listWorkflows(conversationId?: string): Promise<Workflow[]> {
+  const suffix = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : "";
+  return request<Workflow[]>(`/api/v1/workflows${suffix}`);
+}
+
+export function createWorkflow(input: {
+  skill_name: string;
+  project_id?: string;
+  conversation_id?: string;
+  input_text?: string;
+}): Promise<Workflow> {
+  return request<Workflow>("/api/v1/workflows", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function getWorkflow(workflowId: string): Promise<Workflow> {
+  return request<Workflow>(`/api/v1/workflows/${workflowId}`);
+}
+
+export function runWorkflow(workflowId: string, input_text = ""): Promise<WorkflowActionResponse> {
+  return request<WorkflowActionResponse>(`/api/v1/workflows/${workflowId}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input_text }),
+  });
+}
+
+export function confirmWorkflow(workflowId: string, text = ""): Promise<WorkflowActionResponse> {
+  return request<WorkflowActionResponse>(`/api/v1/workflows/${workflowId}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function cancelWorkflow(workflowId: string): Promise<WorkflowActionResponse> {
+  return request<WorkflowActionResponse>(`/api/v1/workflows/${workflowId}/cancel`, { method: "POST" });
+}
+
+export function listWorkflowArtifacts(workflowId: string): Promise<WorkflowArtifact[]> {
+  return request<WorkflowArtifact[]>(`/api/v1/workflows/${workflowId}/artifacts`);
+}
+
+export function getWorkflowArtifactUrl(workflowId: string, name: string): string {
+  return `${apiBaseUrl}/api/v1/workflows/${workflowId}/artifacts/${encodeURIComponent(name)}`;
+}
+
+export function downloadWorkflowZipUrl(workflowId: string): string {
+  return `${apiBaseUrl}/api/v1/workflows/${workflowId}/export.zip`;
+}
+
+export async function downloadWorkflowArtifact(workflowId: string, name: string): Promise<Blob> {
+  const response = await fetch(getWorkflowArtifactUrl(workflowId, name), withAuthHeaders());
+  if (!response.ok) throw new Error(`下载失败：${response.status}`);
+  return response.blob();
+}
+
+export async function downloadWorkflowZip(workflowId: string): Promise<Blob> {
+  const response = await fetch(downloadWorkflowZipUrl(workflowId), withAuthHeaders());
+  if (!response.ok) throw new Error(`下载失败：${response.status}`);
+  return response.blob();
+}
+
+// ----- Skills -----
+
+export function listSkills(): Promise<SkillMetadata[]> {
+  return request<SkillMetadata[]>("/api/v1/skills");
+}
+
+// ----- 工具调用审批 -----
+
+export function approveToolCall(toolCallId: string): Promise<{ ok: boolean; status: string }> {
+  return request<{ ok: boolean; status: string }>(`/api/v1/chat/tool-calls/${toolCallId}/approve`, { method: "POST" });
+}
+
+export function rejectToolCall(toolCallId: string): Promise<{ ok: boolean; status: string }> {
+  return request<{ ok: boolean; status: string }>(`/api/v1/chat/tool-calls/${toolCallId}/reject`, { method: "POST" });
+}
+
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 
 export async function streamChat(
   input: {
@@ -308,48 +526,91 @@ export async function streamChat(
     message: string;
     system_prompt?: string;
     web_search_enabled?: boolean;
+    mcp_server_ids?: string[];
   },
   onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetchWithLocalRetry(`${apiBaseUrl}/api/v1/chat/stream`, {
-    ...withAuthHeaders({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-    }),
-  });
-
-  if (!response.ok || !response.body) {
-    let detail = `请求失败：${response.status}`;
-    try {
-      const payload = await response.json();
-      detail = payload.detail ?? detail;
-    } catch {
-      // Keep status fallback.
-    }
-    throw new Error(detail);
+  try {
+    const requestOptions = withAuthHeaders({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    await fetchEventSource(`${apiBaseUrl}/api/v1/chat/stream`, {
+      method: "POST",
+      headers: Object.fromEntries(new Headers(requestOptions.headers).entries()),
+      body: requestOptions.body as string,
+      signal,
+      openWhenHidden: true,
+      async onopen(response) {
+        if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) return;
+        if (response.status === 401 && authToken) {
+          window.dispatchEvent(new Event("ai-workbench-auth-expired"));
+        }
+        let detail = `请求失败：${response.status}`;
+        try {
+          const payload = await response.json();
+          detail = payload.detail ?? detail;
+        } catch {
+          // Keep the HTTP fallback if an upstream response has no JSON body.
+        }
+        throw new Error(detail);
+      },
+      onmessage(message) {
+        if (!message.event || !message.data) return;
+        try {
+          onEvent({ event: message.event as ChatStreamEvent["event"], data: JSON.parse(message.data) } as ChatStreamEvent);
+        } catch {
+          throw new Error("本地后端返回了无法识别的流式消息。");
+        }
+      },
+      onerror(error) {
+        // Re-throwing disables the library's automatic reconnect: replaying a POST could bill the LLM twice.
+        throw error;
+      },
+    });
+  } catch (error) {
+    if (signal?.aborted) return;
+    if (error instanceof Error) throw error;
+    throw localBackendConnectionError();
   }
+}
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      for (const event of parseSseChunk(`${part}\n\n`)) {
-        onEvent(event);
-      }
-    }
-  }
-
-  if (buffer.trim()) {
-    for (const event of parseSseChunk(buffer)) {
-      onEvent(event);
-    }
+export async function resumeToolCallStream(
+  toolCallId: string,
+  onEvent: (event: ResumeToolCallEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const requestOptions = withAuthHeaders({ method: "POST" });
+    await fetchEventSource(`${apiBaseUrl}/api/v1/chat/tool-calls/${toolCallId}/resume-stream`, {
+      method: "POST",
+      headers: Object.fromEntries(new Headers(requestOptions.headers).entries()),
+      signal,
+      openWhenHidden: true,
+      async onopen(response) {
+        if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) return;
+        let detail = `请求失败：${response.status}`;
+        try {
+          const payload = await response.json();
+          detail = payload.detail ?? detail;
+        } catch {
+          // Keep the HTTP fallback if an upstream response has no JSON body.
+        }
+        throw new Error(detail);
+      },
+      onmessage(message) {
+        if (!message.event || !message.data) return;
+        onEvent({ event: message.event as ResumeToolCallEvent["event"], data: JSON.parse(message.data) } as ResumeToolCallEvent);
+      },
+      onerror(error) {
+        throw error;
+      },
+    });
+  } catch (error) {
+    if (signal?.aborted) return;
+    if (error instanceof Error) throw error;
+    throw localBackendConnectionError();
   }
 }

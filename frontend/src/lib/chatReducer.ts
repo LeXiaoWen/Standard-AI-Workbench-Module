@@ -12,6 +12,7 @@ export function applyChatStreamEvent(messages: WorkbenchMessage[], event: ChatSt
         content: "",
         status: "streaming",
         model: event.data.model,
+        usage: event.data.usage,
         created_at: now,
         updated_at: now,
       },
@@ -32,10 +33,18 @@ export function applyChatStreamEvent(messages: WorkbenchMessage[], event: ChatSt
             content: event.data.content,
             status: event.data.status,
             finish_reason: event.data.finish_reason,
-            usage: event.data.usage,
+            usage: event.data.usage ?? message.usage,
             updated_at: now,
           }
         : message,
+    );
+  }
+
+  // 模型请求了工具：后台已将消息置为 tool_pending，本地标记同步，
+  // 工具详情由聊天层维护 pendingToolCall 供 ToolReasoning 展示与审批。
+  if (event.event === "tool_call_pending") {
+    return messages.map((message) =>
+      message.id === event.data.message_id ? { ...message, status: "tool_pending", updated_at: now } : message,
     );
   }
 

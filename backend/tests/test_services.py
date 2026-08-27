@@ -6,7 +6,7 @@ from docx import Document
 
 from backend.schemas import ApiConfig, WebSearchConfig
 from backend.services.document_parser import parse_document
-from backend.services.llm import create_agent
+from backend.services.llm import _build_model
 from backend.services.web_search import WebSearchNotConfiguredError, build_search_context, tavily_search
 
 
@@ -38,17 +38,16 @@ def test_unsupported_file_error():
 
 
 def test_openai_compatible_agent_accepts_base_url():
-    agent = create_agent(
+    model = _build_model(
         ApiConfig(
             provider="DeepSeek",
             base_url="https://api.deepseek.com",
             api_key="test-key",
             model="deepseek-chat",
-        ),
-        "test",
+        )
     )
-    assert agent is not None
-    assert agent.model.role_map["system"] == "system"
+    assert model is not None
+    assert model.model_name == "deepseek-chat"
 
 
 def test_tavily_search_requires_api_key(monkeypatch):

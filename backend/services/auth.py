@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerificationError, VerifyMismatchError
+from argon2.exceptions import VerifyMismatchError, VerificationError
 
 from ..schemas import AuthLoginResponse, AuthUser
 from .workbench_store import utc_now, workbench_store
+
+
+logger = logging.getLogger("bid_design_writer.auth")
 
 
 SESSION_HOURS = 8
@@ -78,6 +82,10 @@ def login_user(username: str, password: str) -> AuthLoginResponse:
     if _hasher.check_needs_rehash(row["password_hash"]):
         workbench_store.update_user_password_hash(row["id"], _hasher.hash(password))
 
+    workbench_store.unlock_credential_vault(row["id"], password)
+    workbench_store.migrate_legacy_secrets_on_login(row["id"], password)
+    workbench_store.sync_credential_status(row["id"])
+
     token = secrets.token_urlsafe(32)
     expires_at = _expires_at()
     workbench_store.create_auth_session(row["id"], _hash_token(token), expires_at)
@@ -88,12 +96,16 @@ def login_user(username: str, password: str) -> AuthLoginResponse:
 def user_from_token(token: str | None) -> AuthUser | None:
     if not token:
         return None
-    return workbench_store.get_auth_session_user(_hash_token(token), utc_now())
+    user = workbench_store.get_auth_session_user(_hash_token(token), utc_now())
+    return user if user and workbench_store.credential_vault_is_unlocked(user.id) else None
 
 
 def logout_token(token: str | None) -> None:
     if token:
+        user = workbench_store.get_auth_session_user(_hash_token(token), utc_now())
         workbench_store.revoke_auth_session(_hash_token(token))
+        if user:
+            workbench_store.lock_credential_vault(user.id)
 
 
 def change_password(user: AuthUser, current_password: str, new_password: str) -> None:
@@ -106,4 +118,10 @@ def change_password(user: AuthUser, current_password: str, new_password: str) ->
         verified = False
     if not verified:
         raise ValueError("当前密码错误。")
-    workbench_store.update_user_password_hash(user.id, _hasher.hash(new_password))
+    workbench_store.change_user_password_and_rotate_credential_vault(
+        user.id,
+        current_password,
+        new_password,
+        _hasher.hash(new_password),
+    )
+    workbench_store.lock_credential_vault(user.id)

@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
-from ..schemas import ChatStreamRequest, WorkbenchConversationCreate
+from ..schemas import ChatStreamRequest, WorkbenchConversationCreate, validate_provider_base_url
+from .logging_config import redact_log_text
 from .tool_runtime import build_tool_specs, execute_tool_call
 from .web_search import build_search_context, tavily_search
 from .workbench_store import workbench_store
@@ -15,6 +16,8 @@ from .workbench_store import workbench_store
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o"
+CONTEXT_CHARACTER_BUDGET = 24_000
+RECENT_CONTEXT_MESSAGES = 12
 
 _cancel_events: dict[str, tuple[str, asyncio.Event]] = {}
 
@@ -47,10 +50,52 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
+def _build_context_summary(existing: str, messages: list[Any]) -> str:
+    lines = [existing] if existing else []
+    for message in messages:
+        content = " ".join(message.content.split())
+        if content:
+            lines.append(f"{message.role}: {content[:800]}")
+    # Keep enough room for the live context while retaining durable decisions.
+    return "\n".join(lines)[-8_000:]
+
+
+def _context_characters(summary: str, messages: list[Any], pending_message: str = "") -> int:
+    return len(summary) + len(pending_message) + sum(len(message.content) for message in messages)
+
+
+def _context_usage(characters: int) -> dict[str, int]:
+    return {
+        "context_characters": characters,
+        "context_budget": CONTEXT_CHARACTER_BUDGET,
+        "context_estimated_tokens": (characters + 3) // 4,
+    }
+
+
+def _merge_usage(context_usage: dict[str, int], provider_usage: dict[str, Any] | None) -> dict[str, Any]:
+    return {**context_usage, **(provider_usage or {})}
+
+
+def _build_context_window(existing_summary: str, previous_messages: list[Any], pending_message: str) -> tuple[str, list[Any], bool]:
+    if _context_characters(existing_summary, previous_messages, pending_message) <= CONTEXT_CHARACTER_BUDGET:
+        return existing_summary, previous_messages, False
+
+    archived_messages = list(previous_messages[:-RECENT_CONTEXT_MESSAGES])
+    recent_messages = list(previous_messages[-RECENT_CONTEXT_MESSAGES:])
+    summary = _build_context_summary(existing_summary, archived_messages)
+    while recent_messages and _context_characters(summary, recent_messages, pending_message) > CONTEXT_CHARACTER_BUDGET:
+        archived_messages.append(recent_messages.pop(0))
+        summary = _build_context_summary(existing_summary, archived_messages)
+
+    available_summary_characters = max(CONTEXT_CHARACTER_BUDGET - len(pending_message), 0)
+    summary = summary[-available_summary_characters:] if available_summary_characters else ""
+    return summary, recent_messages, True
+
+
 async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
     profile = workbench_store.get_provider_profile(user_id, request.provider_profile_id) if request.provider_profile_id else None
     model = request.model or (profile.model if profile else DEFAULT_MODEL)
-    base_url = profile.base_url if profile else DEFAULT_BASE_URL
+    base_url = validate_provider_base_url(profile.base_url) if profile else DEFAULT_BASE_URL
     api_key = workbench_store.resolve_api_key(user_id, request.provider_profile_id, request.api_key)
 
     if not api_key:
@@ -71,8 +116,13 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         )
 
     previous_messages = workbench_store.list_messages(user_id, conversation.id)
+    context_summary = workbench_store.get_context_summary(user_id, conversation.id)
+    context_summary, previous_messages, summary_updated = _build_context_window(context_summary, previous_messages, request.message)
+    if summary_updated:
+        workbench_store.set_context_summary(user_id, conversation.id, context_summary)
+    context_usage = _context_usage(_context_characters(context_summary, previous_messages, request.message))
     user_message = workbench_store.add_message(user_id, conversation.id, "user", request.message)
-    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model)
+    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model, usage=context_usage)
     run_id = str(uuid4())
     cancel_event = asyncio.Event()
     _cancel_events[run_id] = (user_id, cancel_event)
@@ -85,6 +135,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
             "user_message_id": user_message.id,
             "run_id": run_id,
             "model": model,
+            "usage": context_usage,
         },
     )
 
@@ -101,6 +152,8 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
     system_parts: list[str] = []
     if request.system_prompt:
         system_parts.append(request.system_prompt)
+    if context_summary:
+        system_parts.append(f"以下是较早对话的持久化摘要，请将其作为上下文，不要逐字复述：\n{context_summary}")
     if request.web_search_enabled:
         try:
             search_results = await tavily_search(user_id, request.message)
@@ -143,7 +196,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         async for chunk in stream:
             if cancel_event.is_set():
                 final_content = "".join(content_parts)
-                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
+                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled", usage=context_usage)
                 yield sse_event(
                     "message_done",
                     {
@@ -151,6 +204,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
                         "message_id": assistant_message.id,
                         "status": "interrupted",
                         "finish_reason": "cancelled",
+                        "usage": context_usage,
                         "content": final_content,
                     },
                 )
@@ -225,7 +279,8 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
             )
             return
 
-        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
+        merged_usage = _merge_usage(context_usage, usage)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=merged_usage)
         yield sse_event(
             "message_done",
             {
@@ -233,14 +288,14 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
                 "message_id": assistant_message.id,
                 "status": "completed",
                 "finish_reason": finish_reason,
-                "usage": usage,
+                "usage": merged_usage,
                 "content": final_content,
             },
         )
     except Exception as exc:
         final_content = "".join(content_parts)
-        message = str(exc)
-        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=message)
+        message = redact_log_text(str(exc))
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", usage=context_usage, error=message)
         yield sse_event(
             "error",
             {
@@ -399,14 +454,15 @@ async def resume_tool_call_stream(user_id: str, tool_call_id: str) -> AsyncItera
         )
     except Exception as exc:
         final_content = "".join(content_parts)
-        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=str(exc))
+        message = redact_log_text(str(exc))
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=message)
         yield sse_event(
             "error",
             {
                 "conversation_id": conversation.id,
                 "message_id": assistant_message.id,
                 "type": exc.__class__.__name__,
-                "message": str(exc),
+                "message": message,
                 "content": final_content,
             },
         )

@@ -1,0 +1,287 @@
+"use client";
+
+import {
+  BookOpen,
+  Cable,
+  ChevronRight,
+  FolderKanban,
+  FolderOpen,
+  House,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  Settings2,
+  SquarePen,
+  Trash2,
+  Workflow,
+} from "lucide-react";
+
+import { splitSearchHighlight } from "@/lib/searchHighlight";
+import type { AuthUser, SearchResult, SearchResultKind, WorkbenchConversation, WorkbenchProject } from "@/lib/types";
+import styles from "./WorkbenchSidebar.module.css";
+
+type WorkbenchSidebarProps = {
+  collapsed: boolean;
+  projects: WorkbenchProject[];
+  currentProjectId: string | null;
+  currentConversationId: string | null;
+  projectPreviewConversations: WorkbenchConversation[];
+  historyConversations: WorkbenchConversation[];
+  searchQuery: string;
+  searchKind: SearchResultKind | "all";
+  searchResults: SearchResult[];
+  projectsOpen: boolean;
+  projectConversationsOpen: boolean;
+  conversationsOpen: boolean;
+  authUser: AuthUser | null;
+  userPanelOpen: boolean;
+  onToggleSidebar: () => void;
+  onStartNewChat: () => void;
+  onFocusSearch: () => void;
+  onOpenConfig: () => void;
+  onOpenKnowledge: () => void;
+  onOpenMcp: () => void;
+  onOpenWorkflows: () => void;
+  onSearchQueryChange: (value: string) => void;
+  onSearchKindChange: (kind: SearchResultKind | "all") => void;
+  onToggleProjects: () => void;
+  onChooseWorkspace: () => void;
+  onSwitchProject: (project: WorkbenchProject) => void;
+  onToggleProjectConversations: () => void;
+  onRemoveProject: (project: WorkbenchProject) => void;
+  onOpenConversation: (conversationId: string) => void;
+  onRemoveConversation: (conversation: WorkbenchConversation) => void;
+  onToggleConversations: () => void;
+  onToggleUserPanel: () => void;
+};
+
+const searchKindOptions: Array<{ value: SearchResultKind | "all"; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "project", label: "项目" },
+  { value: "conversation", label: "对话" },
+  { value: "message", label: "消息" },
+];
+
+const searchKindLabels: Record<SearchResultKind, string> = {
+  project: "项目",
+  conversation: "对话",
+  message: "消息",
+};
+
+function highlightedText(text: string, query: string) {
+  return splitSearchHighlight(text, query).map((part, index) => part.matched ? <mark key={index}>{part.text}</mark> : <span key={index}>{part.text}</span>);
+}
+
+function userInitials(user: AuthUser | null): string {
+  const name = user?.username.trim();
+  return name ? name.slice(0, 2).toUpperCase() : "未";
+}
+
+function relativeTime(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60_000));
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小时`;
+  return `${Math.round(hours / 24)} 天`;
+}
+
+export function WorkbenchSidebar({
+  collapsed,
+  projects,
+  currentProjectId,
+  currentConversationId,
+  projectPreviewConversations,
+  historyConversations,
+  searchQuery,
+  searchKind,
+  searchResults,
+  projectsOpen,
+  projectConversationsOpen,
+  conversationsOpen,
+  authUser,
+  userPanelOpen,
+  onToggleSidebar,
+  onStartNewChat,
+  onFocusSearch,
+  onOpenConfig,
+  onOpenKnowledge,
+  onOpenMcp,
+  onOpenWorkflows,
+  onSearchQueryChange,
+  onSearchKindChange,
+  onToggleProjects,
+  onChooseWorkspace,
+  onSwitchProject,
+  onToggleProjectConversations,
+  onRemoveProject,
+  onOpenConversation,
+  onRemoveConversation,
+  onToggleConversations,
+  onToggleUserPanel,
+}: WorkbenchSidebarProps) {
+  const openSearchResult = (result: SearchResult) => {
+    if (result.kind === "project") {
+      const project = projects.find((item) => item.id === result.project_id);
+      if (project) onSwitchProject(project);
+      return;
+    }
+    if (result.conversation_id) onOpenConversation(result.conversation_id);
+  };
+
+  return (
+    <aside className={`${styles.sidebar} sidebar`}>
+      <div className="sidebar-top">
+        {!collapsed && <div className="app-mark">Standard AI Workbench</div>}
+        <button className="ghost-icon" onClick={onToggleSidebar} aria-label="折叠菜单">
+          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        </button>
+      </div>
+
+      <div className="menu-block">
+        <button className="menu-command" onClick={onStartNewChat} title="新对话">
+          <SquarePen size={19} />
+          {!collapsed && <span>新对话</span>}
+        </button>
+        <button className="menu-command" onClick={onFocusSearch} title="搜索">
+          <Search size={19} />
+          {!collapsed && <span>搜索</span>}
+        </button>
+        <button className="menu-command" onClick={onOpenConfig} title="模型配置">
+          <Settings2 size={19} />
+          {!collapsed && <span>模型配置</span>}
+        </button>
+        <button className="menu-command" onClick={onOpenKnowledge} title="知识库">
+          <BookOpen size={19} />
+          {!collapsed && <span>知识库</span>}
+        </button>
+        <button className="menu-command" onClick={onOpenMcp} title="MCP 服务">
+          <Cable size={19} />
+          {!collapsed && <span>MCP</span>}
+        </button>
+        <button className="menu-command" onClick={onOpenWorkflows} title="工作流">
+          <Workflow size={19} />
+          {!collapsed && <span>工作流</span>}
+        </button>
+      </div>
+
+      <div className="sidebar-section">
+        {!collapsed && (
+          <button className="section-label section-toggle" onClick={onToggleProjects}>
+            项目
+            <ChevronRight className={projectsOpen ? "chevron open" : "chevron"} size={15} />
+          </button>
+        )}
+        {!collapsed && (
+          <div className="search-box">
+            <Search size={16} />
+            <input value={searchQuery} onChange={(event) => onSearchQueryChange(event.target.value)} placeholder="搜索项目、历史对话" />
+          </div>
+        )}
+        {!collapsed && searchQuery.trim() && (
+          <div className="search-filters" role="group" aria-label="搜索类型">
+            {searchKindOptions.map((option) => (
+              <button key={option.value} type="button" className={searchKind === option.value ? "active" : ""} aria-pressed={searchKind === option.value} onClick={() => onSearchKindChange(option.value)}>{option.label}</button>
+            ))}
+          </div>
+        )}
+        {!collapsed && searchResults.length > 0 && (
+          <div className="search-results">
+            {searchResults.map((result) => (
+              <button key={`${result.kind}-${result.id}`} onClick={() => openSearchResult(result)}>
+                <div className="search-result-title"><em>{searchKindLabels[result.kind]}</em><strong>{highlightedText(result.title, searchQuery)}</strong></div>
+                <span>{highlightedText(result.excerpt, searchQuery)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {projectsOpen && (
+          <div className="nav-list">
+            {!collapsed && (
+              <button type="button" className="workspace-picker-row" onClick={onChooseWorkspace}>
+                <FolderOpen size={17} />
+                <span>选择本地文件夹</span>
+              </button>
+            )}
+            {projects.map((project) => (
+              <div className="project-group" key={project.id}>
+                <div className={project.id === currentProjectId ? "sidebar-item-shell project-shell active" : "sidebar-item-shell"}>
+                  <button className="project-row" onClick={() => onSwitchProject(project)} title={project.workspace_path ? `${project.title}\n${project.workspace_path}` : project.title}>
+                    {project.workspace_path ? <FolderKanban size={18} /> : <House size={18} />}
+                    {!collapsed && <span>{project.title}</span>}
+                  </button>
+                  {!collapsed && project.workspace_path && project.id === currentProjectId && (
+                    <button type="button" className="project-expand-toggle" onClick={onToggleProjectConversations} aria-label={projectConversationsOpen ? `收起 ${project.title} 的对话` : `展开 ${project.title} 的对话`}>
+                      <ChevronRight className={projectConversationsOpen ? "chevron open" : "chevron"} size={15} />
+                    </button>
+                  )}
+                  {!collapsed && (
+                    <button type="button" className="row-delete" onClick={() => onRemoveProject(project)} aria-label={`删除项目 ${project.title}`}>
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+                {!collapsed && project.workspace_path && project.id === currentProjectId && projectConversationsOpen && projectPreviewConversations.map((conversation) => (
+                  <div className={conversation.id === currentConversationId ? "sidebar-item-shell project-chat-shell active" : "sidebar-item-shell project-chat-shell"} key={conversation.id}>
+                    <button className="project-chat-row" onClick={() => onOpenConversation(conversation.id)} title={conversation.title}>
+                      <span>{conversation.title}</span>
+                      <time>{relativeTime(conversation.updated_at)}</time>
+                    </button>
+                    <button type="button" className="row-delete" onClick={() => onRemoveConversation(conversation)} aria-label={`删除对话 ${conversation.title}`}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="sidebar-section grow">
+        {!collapsed && (
+          <button className="section-label section-toggle" onClick={onToggleConversations}>
+            对话
+            <ChevronRight className={conversationsOpen ? "chevron open" : "chevron"} size={15} />
+          </button>
+        )}
+        {conversationsOpen && (
+          <div className="nav-list history-list">
+            {historyConversations.length === 0 && !collapsed ? (
+              <div className="empty-sidebar">暂无其他对话</div>
+            ) : (
+              historyConversations.map((conversation) => (
+                <div className={conversation.id === currentConversationId ? "sidebar-item-shell conversation-shell active" : "sidebar-item-shell conversation-shell"} key={conversation.id}>
+                  <button className="conversation-row" onClick={() => onOpenConversation(conversation.id)} title={conversation.title}>
+                    <MessageSquare size={16} />
+                    {!collapsed && <span>{conversation.title}</span>}
+                    {!collapsed && <time>{relativeTime(conversation.updated_at)}</time>}
+                  </button>
+                  {!collapsed && (
+                    <button type="button" className="row-delete" onClick={() => onRemoveConversation(conversation)} aria-label={`删除对话 ${conversation.title}`}>
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <button type="button" className="account-card" onClick={onToggleUserPanel} title="用户信息">
+        <div className="account-avatar">{userInitials(authUser)}</div>
+        {!collapsed && (
+          <div className="account-copy">
+            <strong>{authUser?.username ?? "未登录"}</strong>
+            <span>本机账号</span>
+          </div>
+        )}
+        {!collapsed && <ChevronRight className={userPanelOpen ? "chevron open" : "chevron"} size={16} />}
+      </button>
+    </aside>
+  );
+}

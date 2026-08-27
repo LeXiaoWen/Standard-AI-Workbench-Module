@@ -48,7 +48,7 @@ async def tavily_search(user_id: str, query: str) -> list[WebSearchResult]:
     config = workbench_store.get_web_search_config(user_id)
     api_key = workbench_store.resolve_tavily_api_key(user_id)
     if not api_key:
-        raise WebSearchNotConfiguredError("未配置 TAVILY_API_KEY，无法使用 Tavily 联网搜索。")
+        raise WebSearchNotConfiguredError("未配置 TAVILY_API_KEY，无法使用联网搜索。")
 
     endpoint = os.getenv("TAVILY_SEARCH_URL", DEFAULT_TAVILY_SEARCH_URL).strip() or DEFAULT_TAVILY_SEARCH_URL
     content_limit = ADVANCED_CONTENT_LIMIT if config.search_depth == "advanced" else BASIC_CONTENT_LIMIT

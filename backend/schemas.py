@@ -1,13 +1,162 @@
-from typing import Any, Dict, List, Optional
+import re
+from enum import Enum
+from ipaddress import ip_address
+from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def is_trusted_local_base_url(value: str) -> bool:
+    """判断 host 是否为本机回环或局域网私网段（允许 http、允许空 api_key）。
+
+    覆盖 localhost/.localhost、回环 127.0.0.1/::1、RFC1918 私网、链路本地、保留段等；
+    域名（无法判断内网）与非公网路由可达的地址按非本地处理。
+    """
+    try:
+        hostname = (urlsplit(value).hostname or "").casefold()
+    except ValueError:
+        return False
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return not ip_address(hostname).is_global
+    except ValueError:
+        return False
+
+
+def validate_provider_base_url(value: str) -> str:
+    base_url = value.strip()
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError as exc:
+        raise ValueError("Base URL 格式无效。") from exc
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme not in ("http", "https") or not hostname or parsed.username or parsed.password:
+        raise ValueError("Base URL 协议或格式无效。")
+    if not is_trusted_local_base_url(base_url) and parsed.scheme != "https":
+        raise ValueError("公网地址必须使用 HTTPS。")
+    return base_url.rstrip("/")
 
 
 class ApiConfig(BaseModel):
     provider: str = "OpenAI"
     base_url: str = "https://api.openai.com/v1"
-    api_key: str = Field(min_length=1)
+    api_key: Optional[str] = None  # 本机/局域网模型可空
     model: str = "gpt-4o"
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return validate_provider_base_url(value)
+
+
+class AuthStatus(BaseModel):
+    authenticated: bool = False
+    username: Optional[str] = None
+    registration_allowed: bool = True
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = value.strip()
+        if not username:
+            raise ValueError("用户名不能为空。")
+        return username
+
+
+class AuthRegisterRequest(AuthLoginRequest):
+    password: str = Field(min_length=12)
+
+
+class AuthLoginResponse(BaseModel):
+    token: str
+    expires_at: str
+    username: str
+
+
+class AuthUser(BaseModel):
+    id: str
+    username: str
+    created_at: str
+    updated_at: str
+    last_login_at: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=12)
+
+
+class ThemeAppearance(str, Enum):
+    AUTO = "auto"
+    LIGHT = "light"
+    DARK = "dark"
+
+
+class UserTheme(BaseModel):
+    id: str
+    name: str
+    source: Literal["system", "custom"]
+    appearance: ThemeAppearance = ThemeAppearance.AUTO
+    image_url: Optional[str] = None
+    image_path: Optional[str] = Field(default=None, exclude=True)
+    media_type: Optional[str] = Field(default=None, exclude=True)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ThemeListResponse(BaseModel):
+    active_theme_id: str
+    themes: List[UserTheme]
+
+
+class ThemeActivateRequest(BaseModel):
+    theme_id: str = Field(min_length=1)
+
+
+class ThemePreferences(BaseModel):
+    """外观偏好：预设皮肤 / 强调色 / 壁纸 2.0，按账号存 user_settings(theme.preferences)。"""
+
+    skin_id: str = "system"
+    accent: Optional[str] = None
+    wallpaper_kind: Optional[Literal["image", "url", "gradient"]] = None
+    wallpaper_url: Optional[str] = None
+    wallpaper_gradient: Optional[str] = None
+    wallpaper_opacity: float = 0.0
+    wallpaper_blur: int = 0
+    wallpaper_autodim: bool = False
+
+    @field_validator("accent")
+    @classmethod
+    def _validate_accent(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip().lower()
+        if not re.fullmatch(r"#[0-9a-f]{6}", value):
+            raise ValueError("强调色必须是 #rrggbb 格式。")
+        return value
+
+    @field_validator("wallpaper_opacity")
+    @classmethod
+    def _validate_opacity(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("壁纸透明度应在 0 到 1 之间。")
+        return value
+
+    @field_validator("wallpaper_blur")
+    @classmethod
+    def _validate_blur(cls, value: int) -> int:
+        if not 0 <= value <= 60:
+            raise ValueError("壁纸模糊应在 0 到 60 之间。")
+        return value
 
 
 class WorkbenchProject(BaseModel):
@@ -76,22 +225,6 @@ class ProviderProfile(BaseModel):
     updated_at: str
 
 
-class ProviderProfileCreate(BaseModel):
-    provider: str = "OpenAI"
-    display_name: str = "OpenAI"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o"
-    api_key: Optional[str] = None
-
-
-class ProviderProfileUpdate(BaseModel):
-    provider: Optional[str] = None
-    display_name: Optional[str] = None
-    base_url: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
-
-
 class ProviderModel(BaseModel):
     id: str
     name: str
@@ -101,22 +234,36 @@ class ProviderModelsResponse(BaseModel):
     models: List[ProviderModel] = Field(default_factory=list)
 
 
-class ChatStreamRequest(BaseModel):
-    conversation_id: Optional[str] = None
-    project_id: Optional[str] = None
-    provider_profile_id: Optional[str] = None
+class ProviderProfileCreate(BaseModel):
+    provider: str = "OpenAI"
+    display_name: str = "OpenAI"
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
+    api_key: Optional[str] = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return validate_provider_base_url(value)
+
+
+class ProviderProfileUpdate(BaseModel):
+    provider: Optional[str] = None
+    display_name: Optional[str] = None
+    base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
-    message: str
-    system_prompt: Optional[str] = None
-    web_search_enabled: bool = False
-    mcp_server_ids: List[str] = Field(default_factory=list)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: Optional[str]) -> Optional[str]:
+        return validate_provider_base_url(value) if value is not None else None
 
 
 class WebSearchConfig(BaseModel):
     provider: str = "tavily"
     has_key: bool = False
-    source: str = "none"  # "db" | "env" | "none"
+    source: str = "none"  # "vault" | "env" | "none"
     max_results: int = 5
     search_depth: str = "basic"
 
@@ -135,6 +282,27 @@ class WebSearchConfigUpdate(BaseModel):
         if depth not in {"basic", "advanced"}:
             raise ValueError("search_depth 只能是 basic 或 advanced。")
         return depth
+
+
+class ChatStreamRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    project_id: Optional[str] = None
+    provider_profile_id: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    message: str
+    system_prompt: Optional[str] = None
+    web_search_enabled: bool = False
+    mcp_server_ids: List[str] = Field(default_factory=list)
+
+
+class SearchResult(BaseModel):
+    kind: str
+    id: str
+    title: str
+    excerpt: str
+    conversation_id: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 class McpServer(BaseModel):
@@ -186,68 +354,6 @@ class ToolCallRecord(BaseModel):
     error: Optional[str] = None
     created_at: str
     updated_at: str
-
-
-class SearchResult(BaseModel):
-    kind: str
-    id: str
-    title: str
-    excerpt: str
-    conversation_id: Optional[str] = None
-    project_id: Optional[str] = None
-
-
-class AuthStatus(BaseModel):
-    authenticated: bool = False
-    username: Optional[str] = None
-    registration_allowed: bool = True
-
-
-class AuthRegisterRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=6)
-
-    @field_validator("username")
-    @classmethod
-    def validate_username(cls, value: str) -> str:
-        username = value.strip()
-        if not username:
-            raise ValueError("用户名不能为空。")
-        if len(username) > 64:
-            raise ValueError("用户名不能超过 64 个字符。")
-        return username
-
-
-class AuthLoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-
-    @field_validator("username")
-    @classmethod
-    def validate_username(cls, value: str) -> str:
-        username = value.strip()
-        if not username:
-            raise ValueError("用户名不能为空。")
-        return username
-
-
-class AuthLoginResponse(BaseModel):
-    token: str
-    expires_at: str
-    username: str
-
-
-class AuthUser(BaseModel):
-    id: str
-    username: str
-    created_at: str
-    updated_at: str
-    last_login_at: Optional[str] = None
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1)
-    new_password: str = Field(min_length=6)
 
 
 class WorkflowStatus:
